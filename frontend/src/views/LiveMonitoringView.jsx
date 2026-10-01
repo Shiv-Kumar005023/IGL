@@ -13,11 +13,11 @@ import {
   VolumeX,
   Sliders,
   AlertOctagon,
-  CheckCircle2
+  CheckCircle2,
+  AlertTriangle
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 import {
-  calculateBoxDistance,
   captureCanvasSnapshot,
   detectObjectsAndMobilePhone,
   loadDetectionModel,
@@ -45,8 +45,22 @@ export default function LiveMonitoringView() {
   const [showZones, setShowZones] = useState(true);
   const [showDistances, setShowDistances] = useState(true);
 
-  // Mobile Phone AI Detection State & Metrics
+  // Model & Detection State
   const [modelInfo, setModelInfo] = useState({ status: "UNINITIALIZED", errorMessage: "" });
+  
+  // Real-time Detection Memory Ref (Decouples 60 FPS Canvas Render from 150ms Async AI Inference)
+  const detectionsRef = useRef({
+    personCount: 0,
+    persons: [],
+    phones: [],
+    phoneMisuseEvent: null
+  });
+
+  const isDetectingRef = useRef(false);
+  const lastInferenceTimeRef = useRef(0);
+  const lastAlertTimeRef = useRef(0);
+
+  // Mobile Phone Misuse Status UI State
   const [phoneMetrics, setPhoneMetrics] = useState({
     phoneDetected: false,
     associatedTrackId: null,
@@ -55,10 +69,10 @@ export default function LiveMonitoringView() {
     durationSec: 0,
     warningLevel: 0,
     sirenActive: false,
-    warningMessage: "System ready. Awaiting camera feed..."
+    warningMessage: "Initializing AI models..."
   });
 
-  // Configurable Phone Detection Settings
+  // Configurable Detection Thresholds
   const [config, setConfig] = useState({
     minConfidence: 0.40,
     minDurationSec: 2.0,
@@ -66,9 +80,7 @@ export default function LiveMonitoringView() {
     maxWarnings: 3
   });
 
-  const lastAlertTimeRef = useRef(0);
-
-  // Initialize TF.js COCO-SSD Model on component mount
+  // Initialize TensorFlow COCO-SSD Model on Mount
   useEffect(() => {
     loadDetectionModel().then(() => {
       setModelInfo(getModelStatus());
@@ -79,20 +91,19 @@ export default function LiveMonitoringView() {
   useEffect(() => {
     if (videoRef.current && activeStream && activeStream instanceof MediaStream) {
       videoRef.current.srcObject = activeStream;
-      videoRef.current.play().catch((e) => console.log(e));
+      videoRef.current.play().catch((e) => console.log("Video playback error:", e));
     }
   }, [activeStream]);
 
-  // Main Canvas Rendering & Inference Loop
+  // Main Render Loop (60 FPS) + Throttled Concurrency-Safe AI Inference (~150ms)
   useEffect(() => {
     let animId;
-    let isProcessingFrame = false;
 
     const renderLoop = async () => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      if (video && canvas && (video.readyState === 4 || video.readyState === 2 || video.width > 0)) {
+      if (video && canvas && (video.readyState === 4 || video.readyState === 2 || video.videoWidth > 0)) {
         if (canvas.width !== video.clientWidth || canvas.height !== video.clientHeight) {
           canvas.width = video.clientWidth || 640;
           canvas.height = video.clientHeight || 360;
@@ -102,10 +113,10 @@ export default function LiveMonitoringView() {
         const width = canvas.width;
         const height = canvas.height;
 
-        // Draw current video frame onto canvas
+        // Draw current video frame onto canvas at 60 FPS
         ctx.drawImage(video, 0, 0, width, height);
 
-        // 1. Draw Dangerous Restricted Zones (Polygons)
+        // 1. Draw Restricted Zones (Polygons)
         if (showZones && restrictedZones.length > 0) {
           restrictedZones.forEach((zone) => {
             if (zone.polygon_coords && zone.polygon_coords.length > 2) {
@@ -126,7 +137,7 @@ export default function LiveMonitoringView() {
               ctx.fillStyle = "#ef4444";
               ctx.font = "bold 12px sans-serif";
               ctx.fillText(
-                `RESTRICTED ZONE: ${zone.zone_name}`,
+                `RESTRICTED AREA: ${zone.zone_name}`,
                 zone.polygon_coords[0][0] * width + 5,
                 zone.polygon_coords[0][1] * height + 15
               );
@@ -134,141 +145,142 @@ export default function LiveMonitoringView() {
           });
         }
 
-        // 2. Run Real-time TensorFlow Object Detection & Phone Association
-        if (showBoxes && !isProcessingFrame) {
-          isProcessingFrame = true;
+        // 2. Trigger Safe Async TensorFlow Object Detection (Every ~150ms, skipping if previous call is still running)
+        const now = Date.now();
+        if (showBoxes && !isDetectingRef.current && now - lastInferenceTimeRef.current >= 150) {
+          isDetectingRef.current = true;
+          lastInferenceTimeRef.current = now;
 
-          try {
-            const detectionResult = await detectObjectsAndMobilePhone(video, config);
-            const activePersons = detectionResult.persons || [];
-            const activePhones = detectionResult.phones || [];
+          detectObjectsAndMobilePhone(video, config)
+            .then((result) => {
+              detectionsRef.current = result;
 
-            // Update person count context & UI state (Strictly 0 if no person detected!)
-            if (detectionResult.personCount !== personCount) {
-              setPersonCount(detectionResult.personCount);
-            }
+              // Synchronize person count (Strictly 0 when AI detects 0 persons)
+              if (result.personCount !== personCount) {
+                setPersonCount(result.personCount);
+              }
 
-            // Update phone misuse metrics
-            if (detectionResult.phoneMisuseEvent) {
-              setPhoneMetrics(detectionResult.phoneMisuseEvent);
+              // Update Phone Misuse Status Panel State
+              if (result.phoneMisuseEvent) {
+                setPhoneMetrics(result.phoneMisuseEvent);
 
-              // Auto-dispatch SQLite Alert when continuous misuse reaches warning or siren escalation
-              const now = Date.now();
-              if (
-                detectionResult.phoneMisuseEvent.warningLevel >= 1 &&
-                now - lastAlertTimeRef.current > 6000
-              ) {
-                lastAlertTimeRef.current = now;
-                const base64Snap = captureCanvasSnapshot(canvas, "MOBILE PHONE MISUSE DETECTED");
-                dispatchAlert({
-                  event_type: "MOBILE_PHONE_USAGE",
-                  zone_name: streamSource?.name || "Main Plant Area",
-                  severity: detectionResult.phoneMisuseEvent.sirenActive ? "CRITICAL" : "HIGH",
-                  confidence: detectionResult.phoneMisuseEvent.phoneConfidence || 0.88,
-                  evidence_image_base64: base64Snap,
-                  metadata: {
-                    track_id: detectionResult.phoneMisuseEvent.associatedTrackId,
-                    duration_sec: detectionResult.phoneMisuseEvent.durationSec,
-                    warning_count: detectionResult.phoneMisuseEvent.warningLevel,
-                    siren_status: detectionResult.phoneMisuseEvent.sirenActive ? "ON" : "OFF"
-                  }
+                // Auto-dispatch Alert to SQLite DB on continuous violation escalation
+                if (
+                  result.phoneMisuseEvent.warningLevel >= 1 &&
+                  now - lastAlertTimeRef.current > 6000
+                ) {
+                  lastAlertTimeRef.current = now;
+                  const base64Snap = captureCanvasSnapshot(canvas, "MOBILE PHONE MISUSE DETECTED");
+                  dispatchAlert({
+                    event_type: "MOBILE_PHONE_USAGE",
+                    zone_name: streamSource?.name || "Plant Monitoring Zone",
+                    severity: result.phoneMisuseEvent.sirenActive ? "CRITICAL" : "HIGH",
+                    confidence: result.phoneMisuseEvent.phoneConfidence || 0.88,
+                    evidence_image_base64: base64Snap,
+                    metadata: {
+                      track_id: result.phoneMisuseEvent.associatedTrackId,
+                      duration_sec: result.phoneMisuseEvent.durationSec,
+                      warning_count: result.phoneMisuseEvent.warningLevel,
+                      siren_status: result.phoneMisuseEvent.sirenActive ? "ON" : "OFF"
+                    }
+                  });
+                }
+              } else {
+                setPhoneMetrics({
+                  phoneDetected: false,
+                  associatedTrackId: null,
+                  personConfidence: 0,
+                  phoneConfidence: 0,
+                  durationSec: 0,
+                  warningLevel: 0,
+                  sirenActive: false,
+                  warningMessage:
+                    result.personCount > 0
+                      ? "Monitoring active. No phone usage detected."
+                      : "No persons detected in frame."
                 });
               }
-            } else {
-              setPhoneMetrics({
-                phoneDetected: false,
-                associatedTrackId: null,
-                personConfidence: 0,
-                phoneConfidence: 0,
-                durationSec: 0,
-                warningLevel: 0,
-                sirenActive: false,
-                warningMessage: activePersons.length > 0 ? "Monitoring active. No phone usage detected." : "No persons detected in frame."
-              });
-            }
+            })
+            .catch((err) => {
+              console.error("AI Inference Error:", err);
+            })
+            .finally(() => {
+              isDetectingRef.current = false;
+            });
+        }
 
-            // Render Detected Bounding Boxes on Canvas
-            const drawnPersonBoxes = [];
+        // 3. Draw Real AI Detection Bounding Boxes from TensorFlow Results
+        if (showBoxes) {
+          const currentDetections = detectionsRef.current;
+          const activePersons = currentDetections.persons || [];
+          const activePhones = currentDetections.phones || [];
+          const drawnPersonBoxes = [];
 
-            // Draw Detected Persons
-            for (let i = 0; i < activePersons.length; i++) {
-              const pObj = activePersons[i];
-              const p = pObj.box;
-              const px = p[0] * width, py = p[1] * height, pw = p[2] * width, ph = p[3] * height;
+          // Draw Person Bounding Boxes
+          for (let i = 0; i < activePersons.length; i++) {
+            const pObj = activePersons[i];
+            const p = pObj.box;
+            const px = p[0] * width, py = p[1] * height, pw = p[2] * width, ph = p[3] * height;
 
-              // Change border color to bright amber/red if person is using phone
-              const boxColor = pObj.isUsingPhone ? "#f59e0b" : pObj.color;
-              ctx.strokeStyle = boxColor;
-              ctx.lineWidth = pObj.isUsingPhone ? 3.5 : 2.5;
-              ctx.strokeRect(px, py, pw, ph);
+            const boxColor = pObj.isUsingPhone ? "#f59e0b" : pObj.color;
+            ctx.strokeStyle = boxColor;
+            ctx.lineWidth = pObj.isUsingPhone ? 3.5 : 2.5;
+            ctx.strokeRect(px, py, pw, ph);
 
-              // Label Badge
-              const tagText = pObj.isUsingPhone
-                ? `${pObj.trackId} [PHONE DETECTED]`
-                : pObj.hasHelmet
-                ? `${pObj.trackId} [Helmet OK]`
-                : `${pObj.trackId} [NO HELMET]`;
+            const tagText = pObj.isUsingPhone
+              ? `${pObj.trackId} [PHONE DETECTED]`
+              : pObj.hasHelmet
+              ? `${pObj.trackId} [Helmet OK]`
+              : `${pObj.trackId} [NO HELMET]`;
 
-              ctx.fillStyle = pObj.isUsingPhone ? "rgba(245, 158, 11, 0.95)" : pObj.hasHelmet ? "rgba(16, 185, 129, 0.9)" : "rgba(239, 68, 68, 0.95)";
-              ctx.fillRect(px, py - 24, Math.max(160, tagText.length * 8.5), 24);
+            ctx.fillStyle = pObj.isUsingPhone
+              ? "rgba(245, 158, 11, 0.95)"
+              : pObj.hasHelmet
+              ? "rgba(16, 185, 129, 0.9)"
+              : "rgba(239, 68, 68, 0.95)";
+            ctx.fillRect(px, py - 24, Math.max(160, tagText.length * 8.5), 24);
 
-              ctx.fillStyle = "#ffffff";
-              ctx.font = "bold 11px sans-serif";
-              ctx.fillText(tagText, px + 6, py - 7);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 11px sans-serif";
+            ctx.fillText(tagText, px + 6, py - 7);
 
-              drawnPersonBoxes.push({ trackId: pObj.trackId, px, py, pw, ph, center: [px + pw / 2, py + ph / 2] });
+            drawnPersonBoxes.push({ trackId: pObj.trackId, px, py, pw, ph, center: [px + pw / 2, py + ph / 2] });
+          }
 
-              // Record observation to SQLite DB
-              if (Math.random() < 0.05) {
-                recordObservation({
-                  track_id: pObj.trackId,
-                  zone_name: streamSource?.name || "Main Plant Area",
-                  bounding_box: pObj.box,
-                  confidence: pObj.confidence
-                });
-              }
-            }
+          // Draw Associated Phone Bounding Boxes
+          for (let j = 0; j < activePhones.length; j++) {
+            const phObj = activePhones[j];
+            const phBox = phObj.box;
+            const phx = phBox[0] * width, phy = phBox[1] * height, phw = phBox[2] * width, phh = phBox[3] * height;
 
-            // Draw Detected Phones
-            for (let j = 0; j < activePhones.length; j++) {
-              const phObj = activePhones[j];
-              const phBox = phObj.box;
-              const phx = phBox[0] * width, phy = phBox[1] * height, phw = phBox[2] * width, phh = phBox[3] * height;
+            ctx.strokeStyle = "#06b6d4";
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([3, 3]);
+            ctx.strokeRect(phx, phy, phw, phh);
+            ctx.setLineDash([]);
 
+            ctx.fillStyle = "rgba(6, 182, 212, 0.9)";
+            ctx.fillRect(phx, phy - 20, 110, 20);
+            ctx.fillStyle = "#000000";
+            ctx.font = "bold 10px sans-serif";
+            ctx.fillText(`Phone (${Math.round(phObj.confidence * 100)}%)`, phx + 4, phy - 6);
+          }
+
+          // Draw Proximity Distance Lines between Multiple Detected Persons
+          if (showDistances && drawnPersonBoxes.length > 1) {
+            for (let i = 0; i < drawnPersonBoxes.length - 1; i++) {
+              const b1 = drawnPersonBoxes[i];
+              const b2 = drawnPersonBoxes[i + 1];
+
+              ctx.beginPath();
+              ctx.moveTo(b1.center[0], b1.center[1]);
+              ctx.lineTo(b2.center[0], b2.center[1]);
               ctx.strokeStyle = "#06b6d4";
-              ctx.lineWidth = 2.5;
-              ctx.setLineDash([3, 3]);
-              ctx.strokeRect(phx, phy, phw, phh);
+              ctx.lineWidth = 1.5;
+              ctx.setLineDash([4, 4]);
+              ctx.stroke();
               ctx.setLineDash([]);
-
-              ctx.fillStyle = "rgba(6, 182, 212, 0.9)";
-              ctx.fillRect(phx, phy - 20, 110, 20);
-              ctx.fillStyle = "#000";
-              ctx.font = "bold 10px sans-serif";
-              ctx.fillText(`Phone (${Math.round(phObj.confidence * 100)}%)`, phx + 4, phy - 6);
             }
-
-            // Proximity Distance Lines between multiple persons
-            if (showDistances && drawnPersonBoxes.length > 1) {
-              for (let i = 0; i < drawnPersonBoxes.length - 1; i++) {
-                const b1 = drawnPersonBoxes[i];
-                const b2 = drawnPersonBoxes[i + 1];
-
-                ctx.beginPath();
-                ctx.moveTo(b1.center[0], b1.center[1]);
-                ctx.lineTo(b2.center[0], b2.center[1]);
-                ctx.strokeStyle = "#06b6d4";
-                ctx.lineWidth = 1.5;
-                ctx.setLineDash([4, 4]);
-                ctx.stroke();
-                ctx.setLineDash([]);
-              }
-            }
-
-          } catch (err) {
-            console.error("Frame processing error:", err);
-          } finally {
-            isProcessingFrame = false;
           }
         }
       }
@@ -283,10 +295,10 @@ export default function LiveMonitoringView() {
     return () => cancelAnimationFrame(animId);
   }, [streamSource, showBoxes, showZones, showDistances, restrictedZones, personCount, config]);
 
-  // Capture Snapshot and Dispatch Manual Alert
+  // Capture Canvas Snapshot and Dispatch Manual Incident Alert
   const handleCaptureEvidenceAlert = () => {
     const canvas = canvasRef.current;
-    const base64Snap = captureCanvasSnapshot(canvas, "SAFETY VIOLATION SNAPSHOT");
+    const base64Snap = captureCanvasSnapshot(canvas, "SAFETY INCIDENT EVIDENCE");
 
     dispatchAlert({
       event_type: "PPE_VIOLATION",
@@ -305,7 +317,7 @@ export default function LiveMonitoringView() {
         <div>
           <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <MonitorPlay className="w-5 h-5 text-cyan-400" />
-            Live Camera Screen & Real-Time AI Detection
+            Live Camera Screen & Real AI Person & Phone Detection
           </h1>
           <p className="text-xs text-slate-400 mt-1">
             Real-time computer vision inference powered by TensorFlow.js COCO-SSD object detection.
@@ -321,7 +333,7 @@ export default function LiveMonitoringView() {
             }`}
           >
             {showBoxes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            <span>Show AI Bounding Boxes</span>
+            <span>Show Bounding Boxes</span>
           </button>
 
           <button
@@ -341,7 +353,7 @@ export default function LiveMonitoringView() {
             }`}
           >
             {showDistances ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            <span>Show Proximity Lines</span>
+            <span>Show Distance Lines</span>
           </button>
         </div>
       </div>
@@ -371,16 +383,22 @@ export default function LiveMonitoringView() {
 
           <div className="text-[11px] text-slate-500 font-medium flex items-center gap-1.5">
             <Users className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Strict AI Frame Inference • 0 fallback enforcement active</span>
+            <span>Strict TensorFlow.js COCO-SSD Inference • Zero heuristic fallbacks</span>
           </div>
         </div>
       )}
 
-      {/* PHASE 11: Real-Time Mobile Phone Misuse Detection Status Panel */}
+      {/* Mobile Phone Misuse Detection Status Panel */}
       <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 text-slate-100 space-y-4 shadow-xl">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
-            <div className={`p-2 rounded-xl border ${phoneMetrics.phoneDetected ? "bg-amber-500/20 text-amber-400 border-amber-500/30 animate-pulse" : "bg-slate-800 text-slate-400 border-slate-700"}`}>
+            <div
+              className={`p-2 rounded-xl border ${
+                phoneMetrics.phoneDetected
+                  ? "bg-amber-500/20 text-amber-400 border-amber-500/30 animate-pulse"
+                  : "bg-slate-800 text-slate-400 border-slate-700"
+              }`}
+            >
               <Smartphone className="w-5 h-5" />
             </div>
             <div>
@@ -388,28 +406,30 @@ export default function LiveMonitoringView() {
                 Mobile Phone Misuse Detection Status
               </h2>
               <p className="text-[11px] text-slate-400">
-                Continuous AI tracking, warning system & siren escalation engine
+                Continuous AI tracking, warning escalation & audible siren engine
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className={`px-3 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
-              phoneMetrics.sirenActive
-                ? "bg-red-500/20 text-red-400 border-red-500/40 animate-pulse"
-                : phoneMetrics.phoneDetected
-                ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
-                : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-            }`}>
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
+                phoneMetrics.sirenActive
+                  ? "bg-red-500/20 text-red-400 border-red-500/40 animate-pulse"
+                  : phoneMetrics.phoneDetected
+                  ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                  : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+              }`}
+            >
               {phoneMetrics.sirenActive ? (
                 <>
                   <Volume2 className="w-3.5 h-3.5 text-red-400 animate-bounce" />
-                  <span>SIREN ACTIVE (WARNING 3 REAGHED)</span>
+                  <span>SIREN ACTIVE (WARNING 3 REACHED)</span>
                 </>
               ) : phoneMetrics.phoneDetected ? (
                 <>
                   <AlertOctagon className="w-3.5 h-3.5 text-amber-400" />
-                  <span>PHONE DETECTED IN USE</span>
+                  <span>PHONE MISUSE DETECTED</span>
                 </>
               ) : (
                 <>
@@ -423,7 +443,6 @@ export default function LiveMonitoringView() {
 
         {/* Live Metrics Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
-          {/* Item 1: Phone Detected */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Phone Detected</span>
             <div className={`mt-1 text-sm font-bold ${phoneMetrics.phoneDetected ? "text-amber-400" : "text-slate-300"}`}>
@@ -431,7 +450,6 @@ export default function LiveMonitoringView() {
             </div>
           </div>
 
-          {/* Item 2: Associated Person */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Associated Person</span>
             <div className="mt-1 text-sm font-bold font-mono text-cyan-400">
@@ -439,7 +457,6 @@ export default function LiveMonitoringView() {
             </div>
           </div>
 
-          {/* Item 3: Confidence */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Detection Conf.</span>
             <div className="mt-1 text-sm font-bold text-slate-200">
@@ -447,7 +464,6 @@ export default function LiveMonitoringView() {
             </div>
           </div>
 
-          {/* Item 4: Continuous Duration */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Continuous Duration</span>
             <div className="mt-1 text-sm font-bold font-mono text-emerald-400">
@@ -455,7 +471,6 @@ export default function LiveMonitoringView() {
             </div>
           </div>
 
-          {/* Item 5: Warning Level */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Warning Level</span>
             <div className={`mt-1 text-sm font-bold ${phoneMetrics.warningLevel > 0 ? "text-red-400" : "text-slate-300"}`}>
@@ -463,7 +478,6 @@ export default function LiveMonitoringView() {
             </div>
           </div>
 
-          {/* Item 6: Siren Status */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Siren Alarm</span>
             <div className={`mt-1 text-sm font-bold ${phoneMetrics.sirenActive ? "text-red-400 animate-pulse" : "text-slate-400"}`}>
@@ -472,21 +486,23 @@ export default function LiveMonitoringView() {
           </div>
         </div>
 
-        {/* Warning Banner Message */}
+        {/* Status Message Banner */}
         {phoneMetrics.warningMessage && (
-          <div className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
-            phoneMetrics.sirenActive
-              ? "bg-red-500/20 border-red-500/40 text-red-300"
-              : phoneMetrics.phoneDetected
-              ? "bg-amber-500/20 border-amber-500/30 text-amber-300"
-              : "bg-slate-800/80 border-slate-700 text-slate-300"
-          }`}>
+          <div
+            className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+              phoneMetrics.sirenActive
+                ? "bg-red-500/20 border-red-500/40 text-red-300"
+                : phoneMetrics.phoneDetected
+                ? "bg-amber-500/20 border-amber-500/30 text-amber-300"
+                : "bg-slate-800/80 border-slate-700 text-slate-300"
+            }`}
+          >
             <AlertOctagon className="w-4 h-4 shrink-0 text-amber-400" />
             <span>{phoneMetrics.warningMessage}</span>
           </div>
         )}
 
-        {/* Configurable Sliders & Thresholds */}
+        {/* Threshold Sliders & Controls */}
         <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400">
           <div className="flex items-center gap-2 font-bold text-slate-300">
             <Sliders className="w-3.5 h-3.5 text-cyan-400" />
@@ -598,7 +614,7 @@ export default function LiveMonitoringView() {
         )}
       </div>
 
-      {/* AI Technical Detection Criteria Card */}
+      {/* AI Technical Criteria Description */}
       <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-4 text-xs text-slate-700">
         <div className="flex items-center gap-2 font-bold text-sm text-slate-900">
           <Info className="w-5 h-5 text-sky-600" />
@@ -609,14 +625,14 @@ export default function LiveMonitoringView() {
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
             <div className="font-bold text-slate-900 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>1. Object Detection & Zero-Fallback Rule:</span>
+              <span>1. TensorFlow.js Object Detection & Zero-Fallback Rule:</span>
             </div>
             <ul className="list-disc pl-5 space-y-1 text-slate-600 font-medium">
               <li>
-                <strong>Model:</strong> TensorFlow.js COCO-SSD (MobileNetV2 architecture).
+                <strong>Model Engine:</strong> TensorFlow.js COCO-SSD (MobileNetV2 architecture).
               </li>
               <li>
-                <strong>Zero Persons Rule:</strong> Frame mein person na hone par count strictly 0 rehta hai.
+                <strong>Zero Persons Rule:</strong> Frame me person na hone par count strictly 0 rehta hai.
               </li>
               <li>
                 <strong>Phone Model:</strong> COCO class <code>cell phone</code> with normalized spatial bboxes.
@@ -627,17 +643,17 @@ export default function LiveMonitoringView() {
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
             <div className="font-bold text-slate-900 flex items-center gap-1.5">
               <Smartphone className="w-4 h-4 text-cyan-600" />
-              <span>2. Person-Phone Spatial Association & Siren:</span>
+              <span>2. Person-Phone Association & Safe Concurrency:</span>
             </div>
             <ul className="list-disc pl-5 space-y-1 text-slate-600 font-medium">
               <li>
-                <strong>Association:</strong> Detected phone center + person interaction ROI check.
+                <strong>Safe Concurrency:</strong> Async TensorFlow inference runs every ~150ms with a non-overlapping lock.
               </li>
               <li>
-                <strong>Verification:</strong> Configurable persistence (2.0s duration check).
+                <strong>Spatial Association:</strong> Detected phone center + person interaction ROI check.
               </li>
               <li>
-                <strong>Siren Escalation:</strong> 3 warnings reached hone par Web Audio siren activate hota hai aur SQLite alert dispatch hota hai.
+                <strong>Warning System:</strong> Warning 1 $\rightarrow$ 2 $\rightarrow$ 3 $\rightarrow$ Audible Web Audio Siren.
               </li>
             </ul>
           </div>
