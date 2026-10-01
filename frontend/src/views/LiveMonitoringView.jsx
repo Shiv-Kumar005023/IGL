@@ -14,7 +14,8 @@ import {
   Sliders,
   AlertOctagon,
   CheckCircle2,
-  AlertTriangle
+  Bug,
+  Activity
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 import {
@@ -48,11 +49,14 @@ export default function LiveMonitoringView() {
   // Model & Detection State
   const [modelInfo, setModelInfo] = useState({ status: "UNINITIALIZED", errorMessage: "" });
   
-  // Real-time Detection Memory Ref (Decouples 60 FPS Canvas Render from 150ms Async AI Inference)
+  // Real-Time Detection Memory Ref
   const detectionsRef = useRef({
     personCount: 0,
     persons: [],
     phones: [],
+    rawPredictionsCount: 0,
+    rawDetectionsSummary: [],
+    phoneCandidates: [],
     phoneMisuseEvent: null
   });
 
@@ -72,9 +76,17 @@ export default function LiveMonitoringView() {
     warningMessage: "Initializing AI models..."
   });
 
+  // Debug Inspector State for UI
+  const [debugData, setDebugData] = useState({
+    rawPredictionsCount: 0,
+    rawDetectionsSummary: [],
+    phoneCandidates: []
+  });
+
   // Configurable Detection Thresholds
   const [config, setConfig] = useState({
-    minConfidence: 0.40,
+    minConfidence: 0.35,
+    phoneThreshold: 0.15,
     minDurationSec: 2.0,
     warningIntervalSec: 2.5,
     maxWarnings: 3
@@ -103,7 +115,12 @@ export default function LiveMonitoringView() {
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      if (video && canvas && (video.readyState === 4 || video.readyState === 2 || video.videoWidth > 0)) {
+      // Verify video frame availability
+      if (
+        video &&
+        canvas &&
+        (video.readyState >= 2 || video.videoWidth > 0)
+      ) {
         if (canvas.width !== video.clientWidth || canvas.height !== video.clientHeight) {
           canvas.width = video.clientWidth || 640;
           canvas.height = video.clientHeight || 360;
@@ -145,7 +162,7 @@ export default function LiveMonitoringView() {
           });
         }
 
-        // 2. Trigger Safe Async TensorFlow Object Detection (Every ~150ms, skipping if previous call is still running)
+        // 2. Trigger Safe Async TensorFlow Object Detection (Every ~150ms)
         const now = Date.now();
         if (showBoxes && !isDetectingRef.current && now - lastInferenceTimeRef.current >= 150) {
           isDetectingRef.current = true;
@@ -154,6 +171,13 @@ export default function LiveMonitoringView() {
           detectObjectsAndMobilePhone(video, config)
             .then((result) => {
               detectionsRef.current = result;
+
+              // Synchronize debug state
+              setDebugData({
+                rawPredictionsCount: result.rawPredictionsCount || 0,
+                rawDetectionsSummary: result.rawDetectionsSummary || [],
+                phoneCandidates: result.phoneCandidates || []
+              });
 
               // Synchronize person count (Strictly 0 when AI detects 0 persons)
               if (result.personCount !== personCount) {
@@ -164,7 +188,6 @@ export default function LiveMonitoringView() {
               if (result.phoneMisuseEvent) {
                 setPhoneMetrics(result.phoneMisuseEvent);
 
-                // Auto-dispatch Alert to SQLite DB on continuous violation escalation
                 if (
                   result.phoneMisuseEvent.warningLevel >= 1 &&
                   now - lastAlertTimeRef.current > 6000
@@ -263,7 +286,7 @@ export default function LiveMonitoringView() {
             ctx.fillRect(phx, phy - 20, 110, 20);
             ctx.fillStyle = "#000000";
             ctx.font = "bold 10px sans-serif";
-            ctx.fillText(`Phone (${Math.round(phObj.confidence * 100)}%)`, phx + 4, phy - 6);
+            ctx.fillText(`Cell Phone (${Math.round(phObj.confidence * 100)}%)`, phx + 4, phy - 6);
           }
 
           // Draw Proximity Distance Lines between Multiple Detected Persons
@@ -532,7 +555,20 @@ export default function LiveMonitoringView() {
                 min="0.2"
                 max="0.9"
                 value={config.minConfidence}
-                onChange={(e) => setConfig({ ...config, minConfidence: parseFloat(e.target.value) || 0.4 })}
+                onChange={(e) => setConfig({ ...config, minConfidence: parseFloat(e.target.value) || 0.35 })}
+                className="w-16 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-100 font-mono"
+              />
+            </label>
+
+            <label className="flex items-center gap-2">
+              <span>Phone Threshold:</span>
+              <input
+                type="number"
+                step="0.05"
+                min="0.10"
+                max="0.50"
+                value={config.phoneThreshold}
+                onChange={(e) => setConfig({ ...config, phoneThreshold: parseFloat(e.target.value) || 0.15 })}
                 className="w-16 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-100 font-mono"
               />
             </label>
@@ -548,6 +584,80 @@ export default function LiveMonitoringView() {
                 className="w-14 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-100 font-mono"
               />
             </label>
+          </div>
+        </div>
+      </div>
+
+      {/* AI Model Inspector / Debug Overlay UI Card */}
+      <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-xs font-mono space-y-3">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-800 text-slate-300">
+          <div className="flex items-center gap-2 font-bold">
+            <Bug className="w-4 h-4 text-amber-400" />
+            <span>AI Model Real-Time Debug Inspector</span>
+          </div>
+          <span className="text-[10px] text-slate-500">Live Console & Frame Inspector</span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px]">
+          {/* Col 1: Raw Frame Predictions */}
+          <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+            <span className="text-slate-400 font-semibold flex items-center gap-1">
+              <Activity className="w-3 h-3 text-cyan-400" />
+              Raw AI Predictions:
+            </span>
+            <p className="text-slate-200 font-bold text-sm">
+              {debugData.rawPredictionsCount} Objects In Frame
+            </p>
+            <div className="text-[10px] text-slate-400 max-h-20 overflow-y-auto space-y-0.5 pt-1">
+              {debugData.rawDetectionsSummary.length > 0 ? (
+                debugData.rawDetectionsSummary.map((d, i) => (
+                  <div key={i} className="flex justify-between">
+                    <span>{d.class}</span>
+                    <span className="text-emerald-400">{Math.round(d.score * 100)}%</span>
+                  </div>
+                ))
+              ) : (
+                <span className="text-slate-500 italic">No objects detected</span>
+              )}
+            </div>
+          </div>
+
+          {/* Col 2: Raw Cell Phone Candidates */}
+          <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+            <span className="text-slate-400 font-semibold flex items-center gap-1">
+              <Smartphone className="w-3 h-3 text-amber-400" />
+              Phone Candidates (`cell phone`):
+            </span>
+            <p className={`font-bold text-sm ${debugData.phoneCandidates.length > 0 ? "text-amber-400" : "text-slate-400"}`}>
+              {debugData.phoneCandidates.length > 0 ? `${debugData.phoneCandidates.length} Candidate(s)` : "None detected"}
+            </p>
+            <div className="text-[10px] text-slate-400 max-h-20 overflow-y-auto space-y-0.5 pt-1">
+              {debugData.phoneCandidates.length > 0 ? (
+                debugData.phoneCandidates.map((p, i) => (
+                  <div key={i} className="flex justify-between text-amber-300">
+                    <span>{p.class}</span>
+                    <span>{Math.round(p.score * 100)}%</span>
+                  </div>
+                ))
+              ) : (
+                <span className="text-slate-500 italic">No cell phone class detected</span>
+              )}
+            </div>
+          </div>
+
+          {/* Col 3: Phone Misuse Status */}
+          <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+            <span className="text-slate-400 font-semibold flex items-center gap-1">
+              <ShieldCheck className="w-3 h-3 text-emerald-400" />
+              Phone Misuse Status:
+            </span>
+            <p className={`font-bold text-sm ${phoneMetrics.phoneDetected ? "text-amber-400" : "text-slate-300"}`}>
+              {phoneMetrics.phoneDetected ? "PHONE MISUSE DETECTED" : "No AI phone detection"}
+            </p>
+            <div className="text-[10px] text-slate-400 space-y-0.5 pt-1">
+              <div>Assoc. Person: <span className="text-cyan-400">{phoneMetrics.associatedTrackId || "None"}</span></div>
+              <div>Duration: <span className="text-emerald-400">{phoneMetrics.durationSec}s</span></div>
+            </div>
           </div>
         </div>
       </div>

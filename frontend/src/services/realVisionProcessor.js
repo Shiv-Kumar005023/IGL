@@ -28,6 +28,7 @@ let sirenInterval = null;
 
 /**
  * Load TensorFlow COCO-SSD Model asynchronously
+ * Prefers 'mobilenet_v2' for higher resolution feature extraction on small objects like cell phones.
  */
 export async function loadDetectionModel() {
   if (modelStatus === "READY" && cocoModel) {
@@ -46,10 +47,17 @@ export async function loadDetectionModel() {
       // Ensure TF backend is initialized
       await tf.ready();
       
-      // Load COCO-SSD lightweight MobileNetV2 model
-      cocoModel = await cocoSsd.load({
-        base: "lite_mobilenet_v2"
-      });
+      // Load COCO-SSD MobileNetV2 model for improved small object resolution
+      try {
+        cocoModel = await cocoSsd.load({
+          base: "mobilenet_v2"
+        });
+      } catch (e) {
+        console.warn("Falling back to lite_mobilenet_v2:", e);
+        cocoModel = await cocoSsd.load({
+          base: "lite_mobilenet_v2"
+        });
+      }
 
       modelStatus = "READY";
       console.log("✅ TensorFlow COCO-SSD Object Detection Model Loaded Successfully.");
@@ -365,7 +373,6 @@ export function startSirenAlarm() {
     sirenGain.connect(sirenAudioContext.destination);
     sirenOscillator.start();
 
-    // Modulate frequency to create oscillating police/industrial emergency siren
     let highPitch = true;
     sirenInterval = setInterval(() => {
       if (sirenOscillator && sirenAudioContext && sirenAudioContext.state === "running") {
@@ -405,18 +412,12 @@ export function stopSirenAlarm() {
  * Main Real-Time Frame Inference & Tracking Engine
  * Runs TensorFlow COCO-SSD Object Detection on canvas/video element.
  * 
- * Returns:
- * {
- *   isModelLoaded: boolean,
- *   modelStatus: string,
- *   personCount: number,
- *   persons: Array,
- *   phones: Array,
- *   phoneMisuseEvent: Object | null
- * }
+ * Configured with a low internal detection score threshold (0.15) to capture small
+ * phone objects before applying application-level filtering & spatial association.
  */
 export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
-  const minConfidence = config.minConfidence || 0.40;
+  const minConfidence = config.minConfidence || 0.35;
+  const phoneThreshold = config.phoneThreshold || 0.15; // Lower threshold specifically to capture small cell phone bounding boxes
   const minDurationSec = config.minDurationSec || 2.0;
   const maxWarnings = config.maxWarnings || 3;
   const warningIntervalSec = config.warningIntervalSec || 2.5;
@@ -428,6 +429,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       personCount: 0,
       persons: [],
       phones: [],
+      rawPredictionsCount: 0,
+      rawDetectionsSummary: [],
+      phoneCandidates: [],
       phoneMisuseEvent: null
     };
   }
@@ -443,6 +447,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         personCount: 0,
         persons: [],
         phones: [],
+        rawPredictionsCount: 0,
+        rawDetectionsSummary: [],
+        phoneCandidates: [],
         phoneMisuseEvent: null
       };
     }
@@ -459,28 +466,58 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         personCount: 0,
         persons: [],
         phones: [],
+        rawPredictionsCount: 0,
+        rawDetectionsSummary: [],
+        phoneCandidates: [],
         phoneMisuseEvent: null
       };
     }
 
-    // Run TensorFlow COCO-SSD Inference on real frame
-    const rawPredictions = await cocoModel.detect(videoOrCanvas, 12, 0.35);
+    // Run TensorFlow COCO-SSD Inference with LOW score threshold (0.15) to capture small objects (cell phones)
+    // maxNumBoxes = 25
+    const rawPredictions = await cocoModel.detect(videoOrCanvas, 25, 0.15);
+
+    // MANDATORY DEBUG LOGGING FOR VERIFICATION
+    console.log(
+      "ALL AI DETECTIONS:",
+      rawPredictions.map((p) => ({
+        class: p.class,
+        score: Math.round(p.score * 100) / 100,
+        bbox: p.bbox
+      }))
+    );
+
+    console.log(
+      "PHONE CANDIDATES:",
+      rawPredictions.filter((p) => p.class === "cell phone")
+    );
 
     // 1. Extract Person Detections (class === 'person')
     const personDetections = rawPredictions.filter(
       (p) => p.class === "person" && p.score >= minConfidence
     );
 
-    // 2. Extract Cell Phone Detections (class === 'cell phone' / 'phone' / 'mobile phone')
+    // 2. Extract Cell Phone Detections (COCO class 'cell phone')
     const phoneDetections = rawPredictions.filter(
-      (p) => (p.class === "cell phone" || p.class === "mobile phone" || p.class === "phone") && p.score >= 0.30
+      (p) =>
+        (p.class === "cell phone" || p.class === "mobile phone" || p.class === "phone") &&
+        p.score >= phoneThreshold
     );
+
+    // Summary data for UI Real-Time AI Debug Inspector
+    const rawDetectionsSummary = rawPredictions.map((p) => ({
+      class: p.class,
+      score: Math.round(p.score * 100) / 100
+    }));
+
+    const phoneCandidatesSummary = phoneDetections.map((p) => ({
+      class: p.class,
+      score: Math.round(p.score * 100) / 100
+    }));
 
     // STRICT RULE: If 0 persons detected by AI, count is strictly 0!
     if (personDetections.length === 0) {
-      // Clean up active tracks
       activeTracks = [];
-      // Clean up phone misuse map if empty
       phoneMisuseState.clear();
       stopSirenAlarm();
 
@@ -490,6 +527,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         personCount: 0,
         persons: [],
         phones: [],
+        rawPredictionsCount: rawPredictions.length,
+        rawDetectionsSummary,
+        phoneCandidates: phoneCandidatesSummary,
         phoneMisuseEvent: null
       };
     }
@@ -499,7 +539,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
     const updatedPersons = [];
 
     personDetections.forEach((det) => {
-      // Convert bbox [x, y, width, height] from pixel scale to 0-1 normalized coordinates
       const normBox = [
         Math.max(0, det.bbox[0] / width),
         Math.max(0, det.bbox[1] / height),
@@ -509,9 +548,8 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
 
       const center = [normBox[0] + normBox[2] / 2, normBox[1] + normBox[3] / 2];
 
-      // Match with existing active tracks by centroid distance
       let matchedTrack = null;
-      let minDistance = 0.25; // Threshold for same person match
+      let minDistance = 0.25;
 
       activeTracks.forEach((tr) => {
         const d = Math.sqrt(Math.pow(tr.center[0] - center[0], 2) + Math.pow(tr.center[1] - center[1], 2));
@@ -533,7 +571,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         activeTracks.push(newTrack);
       }
 
-      // Check helmet PPE inspection
       const helmetCheck = inspectHelmetAndPersonsInCanvas(videoOrCanvas, normBox);
 
       updatedPersons.push({
@@ -549,10 +586,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       });
     });
 
-    // Remove stale tracks not seen in last 3 seconds
     activeTracks = activeTracks.filter((tr) => now - tr.lastSeen < 3000);
 
-    // 4. Person + Mobile Phone Spatial & Temporal Association
+    // 4. Robust Person + Mobile Phone Spatial & Temporal Association
     const normalizedPhones = [];
 
     phoneDetections.forEach((phoneDet) => {
@@ -570,21 +606,31 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         class: phoneDet.class
       });
 
-      // Spatial Association Test: Check if phone center is within expanded person ROI
+      // Spatial Association Test: Check if phone is near person's upper body / head / hand interaction zone
       updatedPersons.forEach((person) => {
         const pBox = person.box;
-        // Expand person box by 15% to include hands / phone interaction zone
-        const expX1 = pBox[0] - pBox[2] * 0.15;
-        const expY1 = pBox[1] - pBox[3] * 0.15;
-        const expX2 = pBox[0] + pBox[2] * 1.15;
+
+        // Expanded person interaction zone (Upper body / Hand / Head region)
+        const expX1 = pBox[0] - pBox[2] * 0.40;
+        const expY1 = pBox[1] - pBox[3] * 0.25;
+        const expX2 = pBox[0] + pBox[2] * 1.40;
         const expY2 = pBox[1] + pBox[3] * 1.15;
 
-        if (
+        const isCenterInside =
           pCenter[0] >= expX1 &&
           pCenter[0] <= expX2 &&
           pCenter[1] >= expY1 &&
-          pCenter[1] <= expY2
-        ) {
+          pCenter[1] <= expY2;
+
+        // Proximity to upper body center [x + w/2, y + h*0.35]
+        const upperBodyCenter = [pBox[0] + pBox[2] / 2, pBox[1] + pBox[3] * 0.35];
+        const distToUpperBody = Math.sqrt(
+          Math.pow(pCenter[0] - upperBodyCenter[0], 2) +
+          Math.pow(pCenter[1] - upperBodyCenter[1], 2)
+        );
+        const isNearUpperBody = distToUpperBody < pBox[3] * 0.65;
+
+        if (isCenterInside || isNearUpperBody) {
           person.isUsingPhone = true;
           person.associatedPhone = {
             box: pNormBox,
@@ -594,7 +640,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       });
     });
 
-    // 5. Temporal Phone Misuse Verification & Warning Escalation State Machine
+    // 5. Temporal Verification & Warning Escalation State Machine
     let currentActivePhoneEvent = null;
     let globalSirenNeeded = false;
 
@@ -619,25 +665,17 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         state.durationSec = Math.round(((now - state.firstSeen) / 1000) * 10) / 10;
         state.lastPhoneConfidence = person.associatedPhone ? person.associatedPhone.confidence : state.lastPhoneConfidence;
 
-        // Check Verification Duration & Escalation Steps
         if (state.durationSec >= minDurationSec) {
-          // Warning 1
           if (state.warningLevel === 0) {
             state.warningLevel = 1;
             state.lastWarningTime = now;
-          }
-          // Warning 2
-          else if (state.warningLevel === 1 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
+          } else if (state.warningLevel === 1 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
             state.warningLevel = 2;
             state.lastWarningTime = now;
-          }
-          // Warning 3
-          else if (state.warningLevel === 2 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
+          } else if (state.warningLevel === 2 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
             state.warningLevel = 3;
             state.lastWarningTime = now;
-          }
-          // Siren Escalation (Triggered after Warning 3)
-          else if (state.warningLevel >= maxWarnings && (now - state.lastWarningTime) / 1000 >= 1.0) {
+          } else if (state.warningLevel >= maxWarnings && (now - state.lastWarningTime) / 1000 >= 1.0) {
             state.sirenActive = true;
           }
         }
@@ -665,7 +703,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         };
 
       } else {
-        // Person stopped using phone -> check reset timer (reset after 2 seconds of no phone)
         if (phoneMisuseState.has(tId)) {
           const state = phoneMisuseState.get(tId);
           if (now - state.lastSeen > 2000) {
@@ -675,7 +712,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       }
     });
 
-    // Handle siren audio toggle
     if (globalSirenNeeded) {
       startSirenAlarm();
     } else {
@@ -688,6 +724,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       personCount: updatedPersons.length,
       persons: updatedPersons,
       phones: normalizedPhones,
+      rawPredictionsCount: rawPredictions.length,
+      rawDetectionsSummary,
+      phoneCandidates: phoneCandidatesSummary,
       phoneMisuseEvent: currentActivePhoneEvent
     };
 
@@ -699,6 +738,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       personCount: 0,
       persons: [],
       phones: [],
+      rawPredictionsCount: 0,
+      rawDetectionsSummary: [],
+      phoneCandidates: [],
       phoneMisuseEvent: null
     };
   }
