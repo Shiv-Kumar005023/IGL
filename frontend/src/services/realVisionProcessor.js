@@ -1,8 +1,84 @@
 /**
  * Real-Time Canvas & Computer Vision Frame Processing Engine
- * Processes actual HTML5 Video/Canvas elements in real-time.
+ * Powered by TensorFlow.js & COCO-SSD for Production-Grade AI Object Detection.
  */
 
+import * as tf from "@tensorflow/tfjs";
+import * as cocoSsd from "@tensorflow-models/coco-ssd";
+
+// Global AI Model & State Handles
+let cocoModel = null;
+let modelLoadingPromise = null;
+let modelStatus = "UNINITIALIZED"; // UNINITIALIZED, LOADING, READY, ERROR
+let modelErrorMessage = "";
+
+// Track ID Generator & Track Memory Across Frames
+let nextTrackId = 101;
+let activeTracks = []; // [{ trackId, box: [x,y,w,h], center: [cx, cy], lastSeen: timestamp }]
+
+// Phone Misuse Persistent Verification State Map
+// key: trackId -> { firstSeen, lastSeen, durationSec, warningLevel, sirenActive, lastWarningTime, lastPhoneConfidence }
+const phoneMisuseState = new Map();
+
+// Siren Web Audio API Synthesizer Handle
+let sirenAudioContext = null;
+let sirenOscillator = null;
+let sirenGain = null;
+let sirenInterval = null;
+
+/**
+ * Load TensorFlow COCO-SSD Model asynchronously
+ */
+export async function loadDetectionModel() {
+  if (modelStatus === "READY" && cocoModel) {
+    return { success: true, model: cocoModel };
+  }
+
+  if (modelStatus === "LOADING" && modelLoadingPromise) {
+    return modelLoadingPromise;
+  }
+
+  modelStatus = "LOADING";
+  modelErrorMessage = "";
+
+  modelLoadingPromise = (async () => {
+    try {
+      // Ensure TF backend is initialized
+      await tf.ready();
+      
+      // Load COCO-SSD lightweight MobileNetV2 model
+      cocoModel = await cocoSsd.load({
+        base: "lite_mobilenet_v2"
+      });
+
+      modelStatus = "READY";
+      console.log("✅ TensorFlow COCO-SSD Object Detection Model Loaded Successfully.");
+      return { success: true, model: cocoModel };
+    } catch (err) {
+      modelStatus = "ERROR";
+      modelErrorMessage = `AI MODEL UNAVAILABLE: ${err.message || "Failed to load TensorFlow model"}`;
+      console.error("❌ COCO-SSD Model Load Error:", err);
+      return { success: false, error: modelErrorMessage };
+    }
+  })();
+
+  return modelLoadingPromise;
+}
+
+/**
+ * Returns current status of the AI Model
+ */
+export function getModelStatus() {
+  return {
+    status: modelStatus,
+    errorMessage: modelErrorMessage,
+    isReady: modelStatus === "READY"
+  };
+}
+
+/**
+ * Frame Quality & Assessability Analyzer (Pitch Dark / Severe Blur / Occlusion)
+ */
 export function analyzeFrameQuality(canvas, ctx) {
   if (!canvas || !ctx) {
     return { isAssessable: false, brightness: 0, blurScore: 0, reason: "Canvas context uninitialized" };
@@ -15,11 +91,9 @@ export function analyzeFrameQuality(canvas, ctx) {
   }
 
   try {
-    // Sample frame pixels (downsampled for speed)
     const sampleWidth = Math.min(width, 160);
     const sampleHeight = Math.min(height, 120);
 
-    // Create offscreen canvas for analysis
     const offCanvas = document.createElement("canvas");
     offCanvas.width = sampleWidth;
     offCanvas.height = sampleHeight;
@@ -30,10 +104,8 @@ export function analyzeFrameQuality(canvas, ctx) {
     const data = imgData.data;
 
     let totalLum = 0;
-    let laplacianVar = 0;
     const gray = new Float32Array(sampleWidth * sampleHeight);
 
-    // Calculate Luminance & Grayscale
     for (let i = 0, j = 0; i < data.length; i += 4, j++) {
       const r = data[i];
       const g = data[i + 1];
@@ -45,7 +117,6 @@ export function analyzeFrameQuality(canvas, ctx) {
 
     const avgBrightness = totalLum / (sampleWidth * sampleHeight);
 
-    // Calculate Gradient Blur Score (Laplacian variance approximation)
     let sumGrad = 0;
     let sumGradSq = 0;
     const count = (sampleWidth - 2) * (sampleHeight - 2);
@@ -53,7 +124,6 @@ export function analyzeFrameQuality(canvas, ctx) {
     for (let y = 1; y < sampleHeight - 1; y++) {
       for (let x = 1; x < sampleWidth - 1; x++) {
         const idx = y * sampleWidth + x;
-        // 3x3 Laplacian kernel [0, 1, 0; 1, -4, 1; 0, 1, 0]
         const val =
           gray[idx - sampleWidth] +
           gray[idx + sampleWidth] +
@@ -79,7 +149,7 @@ export function analyzeFrameQuality(canvas, ctx) {
       };
     }
 
-    if (blurScore < 15.0) {
+    if (blurScore < 12.0) {
       return {
         isAssessable: false,
         brightness: Math.round(avgBrightness),
@@ -101,7 +171,7 @@ export function analyzeFrameQuality(canvas, ctx) {
 }
 
 /**
- * Checks if point (x, y) in 0-1 normalized coordinates is inside a polygon ROI [(x1, y1), (x2, y2), ...]
+ * Checks if point (x, y) in 0-1 normalized coordinates is inside a polygon ROI
  */
 export function isPointInPolygon(point, polygon) {
   if (!polygon || polygon.length < 3) return false;
@@ -130,11 +200,11 @@ export function calculateBoxDistance(box1, box2) {
   const cy2 = box2[1] + box2[3] / 2;
 
   const dist = Math.sqrt(Math.pow(cx1 - cx2, 2) + Math.pow(cy1 - cy2, 2));
-  return Math.round(dist * 100) / 100; // Normalized scale
+  return Math.round(dist * 100) / 100;
 }
 
 /**
- * Extracts average color feature signature [r, g, b] from target bounding box on canvas
+ * Extracts average color feature vector from target bounding box on canvas
  */
 export function extractBoxFeatureVector(canvas, box) {
   if (!canvas) return { r_avg: 128, g_avg: 128, b_avg: 128 };
@@ -178,14 +248,12 @@ export function captureCanvasSnapshot(canvas, overlayText = "") {
     snapCanvas.height = canvas.height || 360;
     const snapCtx = snapCanvas.getContext("2d");
 
-    // Copy frame
     snapCtx.drawImage(canvas, 0, 0, snapCanvas.width, snapCanvas.height);
 
-    // Burn-in evidence watermark box
-    snapCtx.fillStyle = "rgba(15, 23, 42, 0.85)";
-    snapCtx.fillRect(10, snapCanvas.height - 40, snapCanvas.width - 20, 30);
-    snapCtx.fillStyle = "#06b6d4";
-    snapCtx.font = "14px 'JetBrains Mono', monospace";
+    snapCtx.fillStyle = "rgba(15, 23, 42, 0.88)";
+    snapCtx.fillRect(10, snapCanvas.height - 42, snapCanvas.width - 20, 32);
+    snapCtx.fillStyle = "#ef4444";
+    snapCtx.font = "bold 13px 'JetBrains Mono', monospace";
     const timestamp = new Date().toISOString().replace("T", " ").substring(0, 19);
     snapCtx.fillText(`[EVIDENCE SNAPSHOT] ${timestamp} | ${overlayText}`, 20, snapCanvas.height - 20);
 
@@ -196,9 +264,8 @@ export function captureCanvasSnapshot(canvas, overlayText = "") {
 }
 
 /**
- * Technical Computer Vision Helmet Inspection Algorithm:
+ * Computer Vision Helmet Inspection Algorithm:
  * Crops top 25% head region of target bounding box [x, y, w, h] from live canvas.
- * Analyzes HSV Color Saturation, Reflectance, and Skin/Hair vs Safety Hardhat plastic.
  */
 export function inspectHelmetAndPersonsInCanvas(canvas, box) {
   if (!canvas) return { hasHelmet: true, confidence: 0.92, reason: "Default baseline" };
@@ -208,26 +275,22 @@ export function inspectHelmetAndPersonsInCanvas(canvas, box) {
     const width = canvas.width || 640;
     const height = canvas.height || 360;
 
-    // Crop top 25% (Head Region ROI) of the bounding box
     const hx = Math.max(0, Math.floor(box[0] * width));
     const hy = Math.max(0, Math.floor(box[1] * height));
     const hw = Math.max(10, Math.floor(box[2] * width));
-    const hh = Math.max(10, Math.floor(box[3] * height * 0.25)); // Top 25% head area
+    const hh = Math.max(10, Math.floor(box[3] * height * 0.25));
 
     const imgData = ctx.getImageData(hx, hy, hw, hh);
     const data = imgData.data;
 
     let hardhatPixelCount = 0;
     let totalPixels = data.length / 4;
-    let avgSat = 0;
-    let avgVal = 0;
 
     for (let i = 0; i < data.length; i += 4) {
       const r = data[i];
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // Convert RGB to HSV
       const max = Math.max(r, g, b);
       const min = Math.min(r, g, b);
       const d = max - min;
@@ -244,11 +307,6 @@ export function inspectHelmetAndPersonsInCanvas(canvas, box) {
       const s = max === 0 ? 0 : d / max;
       const v = max / 255;
 
-      avgSat += s;
-      avgVal += v;
-
-      // Hardhat Plastic Thresholds:
-      // High Saturation Yellow/Orange (Hue 15-55) OR Red (Hue 0-15 / 340-360) OR Bright White/Blue Helmet
       const isYellowOrange = h >= 15 && h <= 55 && s > 0.35 && v > 0.40;
       const isRedHelmet = (h <= 15 || h >= 345) && s > 0.45 && v > 0.35;
       const isWhiteBlueHelmet = (h >= 180 && h <= 240 && s > 0.30) || (s < 0.15 && v > 0.75);
@@ -258,117 +316,390 @@ export function inspectHelmetAndPersonsInCanvas(canvas, box) {
       }
     }
 
-    avgSat /= totalPixels;
-    avgVal /= totalPixels;
     const hardhatRatio = hardhatPixelCount / totalPixels;
 
-    // Decision Logic: If > 18% of head ROI matches hardhat plastic reflectance -> Helmet WEARING
     if (hardhatRatio > 0.18) {
       return {
         hasHelmet: true,
         confidence: Math.min(0.99, Math.round((0.85 + hardhatRatio * 0.3) * 100) / 100),
-        reason: `HARDHAT DETECTED: Safety helmet plastic detected (${Math.round(hardhatRatio * 100)}% hardhat color ratio in head ROI)`
+        reason: `HARDHAT DETECTED: Safety helmet plastic detected (${Math.round(hardhatRatio * 100)}%)`
       };
     } else {
       return {
         hasHelmet: false,
         confidence: Math.min(0.98, Math.round((0.88 + (1 - hardhatRatio) * 0.1) * 100) / 100),
-        reason: `MISSING HELMET: Hair/skin detected in head ROI (${Math.round(hardhatRatio * 100)}% hardhat color ratio below 18% threshold)`
+        reason: `MISSING HELMET: Hair/skin detected in head ROI (${Math.round(hardhatRatio * 100)}%)`
       };
     }
   } catch (err) {
-    return { hasHelmet: true, confidence: 0.90, reason: `Head ROI analysis error: ${err.message}` };
+    return { hasHelmet: true, confidence: 0.90, reason: `Head ROI error: ${err.message}` };
   }
 }
 
 /**
- * Real-Time Canvas Frame Scanner: Detects active people in webcam/video feed.
- * Strictly outputs "Person #1", "Person #2", etc. with HELMET OK / NO HELMET inspection.
- * NO arbitrary supervisor/worker/visitor role classification!
+ * Siren Escalation Audio Player (Web Audio API Synthesizer)
  */
-export function detectLivePersonsFromFrame(canvas) {
-  if (!canvas) {
-    return { count: 0, persons: [] };
+export function startSirenAlarm() {
+  if (sirenOscillator) return; // Already sounding
+
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+
+    if (!sirenAudioContext || sirenAudioContext.state === "closed") {
+      sirenAudioContext = new AudioCtx();
+    }
+    if (sirenAudioContext.state === "suspended") {
+      sirenAudioContext.resume();
+    }
+
+    sirenOscillator = sirenAudioContext.createOscillator();
+    sirenGain = sirenAudioContext.createGain();
+
+    sirenOscillator.type = "sawtooth";
+    sirenOscillator.frequency.setValueAtTime(600, sirenAudioContext.currentTime);
+
+    sirenGain.gain.setValueAtTime(0.3, sirenAudioContext.currentTime);
+
+    sirenOscillator.connect(sirenGain);
+    sirenGain.connect(sirenAudioContext.destination);
+    sirenOscillator.start();
+
+    // Modulate frequency to create oscillating police/industrial emergency siren
+    let highPitch = true;
+    sirenInterval = setInterval(() => {
+      if (sirenOscillator && sirenAudioContext && sirenAudioContext.state === "running") {
+        const now = sirenAudioContext.currentTime;
+        sirenOscillator.frequency.cancelScheduledValues(now);
+        sirenOscillator.frequency.exponentialRampToValueAtTime(highPitch ? 1200 : 600, now + 0.35);
+        highPitch = !highPitch;
+      }
+    }, 400);
+
+  } catch (e) {
+    console.error("Siren audio trigger failed:", e);
+  }
+}
+
+export function stopSirenAlarm() {
+  if (sirenInterval) {
+    clearInterval(sirenInterval);
+    sirenInterval = null;
+  }
+  if (sirenOscillator) {
+    try {
+      sirenOscillator.stop();
+      sirenOscillator.disconnect();
+    } catch (e) {}
+    sirenOscillator = null;
+  }
+  if (sirenGain) {
+    try {
+      sirenGain.disconnect();
+    } catch (e) {}
+    sirenGain = null;
+  }
+}
+
+/**
+ * Main Real-Time Frame Inference & Tracking Engine
+ * Runs TensorFlow COCO-SSD Object Detection on canvas/video element.
+ * 
+ * Returns:
+ * {
+ *   isModelLoaded: boolean,
+ *   modelStatus: string,
+ *   personCount: number,
+ *   persons: Array,
+ *   phones: Array,
+ *   phoneMisuseEvent: Object | null
+ * }
+ */
+export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
+  const minConfidence = config.minConfidence || 0.40;
+  const minDurationSec = config.minDurationSec || 2.0;
+  const maxWarnings = config.maxWarnings || 3;
+  const warningIntervalSec = config.warningIntervalSec || 2.5;
+
+  if (!videoOrCanvas) {
+    return {
+      isModelLoaded: modelStatus === "READY",
+      modelStatus: modelStatus === "READY" ? "READY" : "NO LIVE INPUT AVAILABLE",
+      personCount: 0,
+      persons: [],
+      phones: [],
+      phoneMisuseEvent: null
+    };
+  }
+
+  // Ensure model is loaded
+  if (modelStatus !== "READY") {
+    const loadRes = await loadDetectionModel();
+    if (!loadRes.success) {
+      return {
+        isModelLoaded: false,
+        modelStatus: "MODEL NOT AVAILABLE",
+        modelErrorMessage,
+        personCount: 0,
+        persons: [],
+        phones: [],
+        phoneMisuseEvent: null
+      };
+    }
   }
 
   try {
-    const width = canvas.width || 640;
-    const height = canvas.height || 360;
+    const width = videoOrCanvas.width || videoOrCanvas.videoWidth || 640;
+    const height = videoOrCanvas.height || videoOrCanvas.videoHeight || 360;
 
-    // Sample frame at 120x90 resolution for high performance scanning
-    const sampleW = 120;
-    const sampleH = 90;
+    if (width === 0 || height === 0) {
+      return {
+        isModelLoaded: true,
+        modelStatus: "NOT ASSESSABLE",
+        personCount: 0,
+        persons: [],
+        phones: [],
+        phoneMisuseEvent: null
+      };
+    }
 
-    const offCanvas = document.createElement("canvas");
-    offCanvas.width = sampleW;
-    offCanvas.height = sampleH;
-    const offCtx = offCanvas.getContext("2d");
-    offCtx.drawImage(canvas, 0, 0, sampleW, sampleH);
+    // Run TensorFlow COCO-SSD Inference on real frame
+    const rawPredictions = await cocoModel.detect(videoOrCanvas, 12, 0.35);
 
-    const imgData = offCtx.getImageData(0, 0, sampleW, sampleH);
-    const data = imgData.data;
+    // 1. Extract Person Detections (class === 'person')
+    const personDetections = rawPredictions.filter(
+      (p) => p.class === "person" && p.score >= minConfidence
+    );
 
-    let leftHumanPixels = 0;
-    let rightHumanPixels = 0;
-    let totalHumanPixels = 0;
+    // 2. Extract Cell Phone Detections (class === 'cell phone' / 'phone' / 'mobile phone')
+    const phoneDetections = rawPredictions.filter(
+      (p) => (p.class === "cell phone" || p.class === "mobile phone" || p.class === "phone") && p.score >= 0.30
+    );
 
-    for (let y = 6; y < sampleH * 0.8; y++) {
-      for (let x = 6; x < sampleW - 6; x++) {
-        const idx = (y * sampleW + x) * 4;
-        const r = data[idx];
-        const g = data[idx + 1];
-        const b = data[idx + 2];
+    // STRICT RULE: If 0 persons detected by AI, count is strictly 0!
+    if (personDetections.length === 0) {
+      // Clean up active tracks
+      activeTracks = [];
+      // Clean up phone misuse map if empty
+      phoneMisuseState.clear();
+      stopSirenAlarm();
 
-        // Robust Human Face & Skin Tone Detection Range (Handles room lighting & webcam white balance)
-        const isHumanSkin = (r > 45 && g > 30 && b > 20 && r >= g && g >= b) || (r > 70 && g > 50 && Math.abs(r - g) < 55);
-        if (isHumanSkin) {
-          totalHumanPixels++;
-          if (x < sampleW * 0.5) leftHumanPixels++;
-          else rightHumanPixels++;
+      return {
+        isModelLoaded: true,
+        modelStatus: "READY",
+        personCount: 0,
+        persons: [],
+        phones: [],
+        phoneMisuseEvent: null
+      };
+    }
+
+    // 3. Multi-Person Tracking Across Frames
+    const now = Date.now();
+    const updatedPersons = [];
+
+    personDetections.forEach((det) => {
+      // Convert bbox [x, y, width, height] from pixel scale to 0-1 normalized coordinates
+      const normBox = [
+        Math.max(0, det.bbox[0] / width),
+        Math.max(0, det.bbox[1] / height),
+        Math.min(1, det.bbox[2] / width),
+        Math.min(1, det.bbox[3] / height)
+      ];
+
+      const center = [normBox[0] + normBox[2] / 2, normBox[1] + normBox[3] / 2];
+
+      // Match with existing active tracks by centroid distance
+      let matchedTrack = null;
+      let minDistance = 0.25; // Threshold for same person match
+
+      activeTracks.forEach((tr) => {
+        const d = Math.sqrt(Math.pow(tr.center[0] - center[0], 2) + Math.pow(tr.center[1] - center[1], 2));
+        if (d < minDistance) {
+          minDistance = d;
+          matchedTrack = tr;
+        }
+      });
+
+      let trackId;
+      if (matchedTrack) {
+        trackId = matchedTrack.trackId;
+        matchedTrack.box = normBox;
+        matchedTrack.center = center;
+        matchedTrack.lastSeen = now;
+      } else {
+        trackId = `TRK-P${nextTrackId++}`;
+        const newTrack = { trackId, box: normBox, center, lastSeen: now };
+        activeTracks.push(newTrack);
+      }
+
+      // Check helmet PPE inspection
+      const helmetCheck = inspectHelmetAndPersonsInCanvas(videoOrCanvas, normBox);
+
+      updatedPersons.push({
+        trackId: trackId,
+        id: trackId,
+        box: normBox,
+        confidence: Math.round(det.score * 100) / 100,
+        hasHelmet: helmetCheck.hasHelmet,
+        label: `${trackId} | Person (${Math.round(det.score * 100)}%)`,
+        color: helmetCheck.hasHelmet ? "#10b981" : "#ef4444",
+        isUsingPhone: false,
+        associatedPhone: null
+      });
+    });
+
+    // Remove stale tracks not seen in last 3 seconds
+    activeTracks = activeTracks.filter((tr) => now - tr.lastSeen < 3000);
+
+    // 4. Person + Mobile Phone Spatial & Temporal Association
+    const normalizedPhones = [];
+
+    phoneDetections.forEach((phoneDet) => {
+      const pNormBox = [
+        Math.max(0, phoneDet.bbox[0] / width),
+        Math.max(0, phoneDet.bbox[1] / height),
+        Math.min(1, phoneDet.bbox[2] / width),
+        Math.min(1, phoneDet.bbox[3] / height)
+      ];
+
+      const pCenter = [pNormBox[0] + pNormBox[2] / 2, pNormBox[1] + pNormBox[3] / 2];
+      normalizedPhones.push({
+        box: pNormBox,
+        confidence: Math.round(phoneDet.score * 100) / 100,
+        class: phoneDet.class
+      });
+
+      // Spatial Association Test: Check if phone center is within expanded person ROI
+      updatedPersons.forEach((person) => {
+        const pBox = person.box;
+        // Expand person box by 15% to include hands / phone interaction zone
+        const expX1 = pBox[0] - pBox[2] * 0.15;
+        const expY1 = pBox[1] - pBox[3] * 0.15;
+        const expX2 = pBox[0] + pBox[2] * 1.15;
+        const expY2 = pBox[1] + pBox[3] * 1.15;
+
+        if (
+          pCenter[0] >= expX1 &&
+          pCenter[0] <= expX2 &&
+          pCenter[1] >= expY1 &&
+          pCenter[1] <= expY2
+        ) {
+          person.isUsingPhone = true;
+          person.associatedPhone = {
+            box: pNormBox,
+            confidence: Math.round(phoneDet.score * 100) / 100
+          };
+        }
+      });
+    });
+
+    // 5. Temporal Phone Misuse Verification & Warning Escalation State Machine
+    let currentActivePhoneEvent = null;
+    let globalSirenNeeded = false;
+
+    updatedPersons.forEach((person) => {
+      const tId = person.trackId;
+
+      if (person.isUsingPhone) {
+        if (!phoneMisuseState.has(tId)) {
+          phoneMisuseState.set(tId, {
+            firstSeen: now,
+            lastSeen: now,
+            durationSec: 0,
+            warningLevel: 0,
+            sirenActive: false,
+            lastWarningTime: now,
+            lastPhoneConfidence: person.associatedPhone ? person.associatedPhone.confidence : 0.85
+          });
+        }
+
+        const state = phoneMisuseState.get(tId);
+        state.lastSeen = now;
+        state.durationSec = Math.round(((now - state.firstSeen) / 1000) * 10) / 10;
+        state.lastPhoneConfidence = person.associatedPhone ? person.associatedPhone.confidence : state.lastPhoneConfidence;
+
+        // Check Verification Duration & Escalation Steps
+        if (state.durationSec >= minDurationSec) {
+          // Warning 1
+          if (state.warningLevel === 0) {
+            state.warningLevel = 1;
+            state.lastWarningTime = now;
+          }
+          // Warning 2
+          else if (state.warningLevel === 1 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
+            state.warningLevel = 2;
+            state.lastWarningTime = now;
+          }
+          // Warning 3
+          else if (state.warningLevel === 2 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
+            state.warningLevel = 3;
+            state.lastWarningTime = now;
+          }
+          // Siren Escalation (Triggered after Warning 3)
+          else if (state.warningLevel >= maxWarnings && (now - state.lastWarningTime) / 1000 >= 1.0) {
+            state.sirenActive = true;
+          }
+        }
+
+        if (state.sirenActive) {
+          globalSirenNeeded = true;
+        }
+
+        currentActivePhoneEvent = {
+          phoneDetected: true,
+          associatedTrackId: tId,
+          personConfidence: person.confidence,
+          phoneConfidence: state.lastPhoneConfidence,
+          durationSec: state.durationSec,
+          warningLevel: state.warningLevel,
+          sirenActive: state.sirenActive,
+          warningMessage:
+            state.warningLevel === 1
+              ? "⚠️ Warning 1: Mobile phone usage detected. Please stop phone usage."
+              : state.warningLevel === 2
+              ? "⚠️ Warning 2: Continued mobile phone usage detected."
+              : state.warningLevel >= 3
+              ? "⚠️ Final Warning: Siren Activated! Please stop mobile phone usage immediately."
+              : "Detecting phone interaction..."
+        };
+
+      } else {
+        // Person stopped using phone -> check reset timer (reset after 2 seconds of no phone)
+        if (phoneMisuseState.has(tId)) {
+          const state = phoneMisuseState.get(tId);
+          if (now - state.lastSeen > 2000) {
+            phoneMisuseState.delete(tId);
+          }
         }
       }
-    }
+    });
 
-    const persons = [];
-
-    // STRICT RULE: Minimum 25 skin/face pixels required to confirm a human on camera
-    if (totalHumanPixels < 25) {
-      return { count: 0, persons: [] };
-    }
-
-    // Person #1 Detected (Main center/left human)
-    if (leftHumanPixels >= 12 || totalHumanPixels >= 25) {
-      const box1 = [0.35, 0.22, 0.24, 0.56];
-      const helmetCheck1 = inspectHelmetAndPersonsInCanvas(canvas, box1);
-      persons.push({
-        id: "Person #1",
-        box: box1,
-        hasHelmet: helmetCheck1.hasHelmet,
-        label: helmetCheck1.hasHelmet ? "Person #1 [Helmet OK]" : "Person #1 [NO HELMET - ALERT]",
-        color: helmetCheck1.hasHelmet ? "#10b981" : "#ef4444",
-        tagBg: helmetCheck1.hasHelmet ? "rgba(16, 185, 129, 0.9)" : "rgba(239, 68, 68, 0.95)"
-      });
-    }
-
-    // Person #2 Detected (If distinct second human is present on right side)
-    if (rightHumanPixels >= 100 && rightHumanPixels > leftHumanPixels * 0.7) {
-      const box2 = [0.65, 0.25, 0.20, 0.50];
-      const helmetCheck2 = inspectHelmetAndPersonsInCanvas(canvas, box2);
-      persons.push({
-        id: "Person #2",
-        box: box2,
-        hasHelmet: helmetCheck2.hasHelmet,
-        label: helmetCheck2.hasHelmet ? "Person #2 [Helmet OK]" : "Person #2 [NO HELMET - ALERT]",
-        color: helmetCheck2.hasHelmet ? "#10b981" : "#ef4444",
-        tagBg: helmetCheck2.hasHelmet ? "rgba(16, 185, 129, 0.9)" : "rgba(239, 68, 68, 0.95)"
-      });
+    // Handle siren audio toggle
+    if (globalSirenNeeded) {
+      startSirenAlarm();
+    } else {
+      stopSirenAlarm();
     }
 
     return {
-      count: persons.length,
-      persons: persons
+      isModelLoaded: true,
+      modelStatus: "READY",
+      personCount: updatedPersons.length,
+      persons: updatedPersons,
+      phones: normalizedPhones,
+      phoneMisuseEvent: currentActivePhoneEvent
     };
+
   } catch (err) {
-    return { count: 0, persons: [] };
+    console.error("Inference Error:", err);
+    return {
+      isModelLoaded: true,
+      modelStatus: `Inference Error: ${err.message}`,
+      personCount: 0,
+      persons: [],
+      phones: [],
+      phoneMisuseEvent: null
+    };
   }
 }
