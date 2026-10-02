@@ -9,7 +9,8 @@ import {
   Activity,
   Settings,
   ShieldCheck,
-  Camera
+  Camera,
+  Boxes
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 
@@ -20,6 +21,7 @@ export default function Sidebar() {
     { id: "dashboard", label: "Overview", icon: Home },
     { id: "camera-input", label: "Camera Setup", icon: Camera, badge: stats.cameras_online > 0 ? "LIVE" : null },
     { id: "live-monitoring", label: "Live Monitoring", icon: Tv },
+    { id: "packaging", label: "Packaging Inspection", icon: Boxes, badge: "NEW" },
     { id: "alerts", label: "Safety Events", icon: ShieldAlert, badge: stats.active_alerts > 0 ? stats.active_alerts : null },
     { id: "near-miss", label: "Near Miss", icon: AlertTriangle },
     { id: "personnel", label: "Incidents", icon: Flame },
