@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IGL VisionGuard AI — System Workflow Presentation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lucide-static@0.321.0/font/lucide.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+    body { font-family: 'Inter', sans-serif; background-color: #030712; color: #f3f4f6; }
+    .glass-card { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.08); }
+    @media print {
+      body { background-color: #fff !important; color: #000 !important; }
+      .no-print { display: none !important; }
+      .slide { page-break-after: always; height: auto !important; border: 1px solid #ddd !important; margin-bottom: 2rem !important; }
+    }
+  </style>
+</head>
+<body className="min-h-screen flex flex-col justify-between">
+
+  <!-- Header Bar -->
+  <header className="no-print border-b border-gray-800 bg-gray-950/80 px-6 py-4 flex items-center justify-between sticky top-0 z-50">
+    <div className="flex items-center gap-3">
+      <div className="p-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-bold text-lg">
+        🛡️ IGL
+      </div>
+      <div>
+        <h1 className="font-bold text-sm text-gray-100">IGL VisionGuard AI — System Workflow Presentation</h1>
+        <p className="text-xs text-gray-400">Production AI Safety & Conveyor Packaging Quality Control Platform</p>
+      </div>
+    </div>
+
+    <div className="flex items-center gap-3">
+      <button onclick="window.print()" className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition shadow-lg shadow-cyan-500/20 flex items-center gap-2">
+        🖨️ Export / Print to PDF
+      </button>
+    </div>
+  </header>
+
+  <!-- Presentation Slides Container -->
+  <main className="max-w-6xl mx-auto p-6 space-y-12 my-6">
+
+    <!-- SLIDE 1: Title & Executive Summary -->
+    <section className="slide glass-card rounded-3xl p-8 space-y-6 border-l-4 border-l-cyan-500">
+      <div className="flex items-center justify-between">
+        <span className="px-3 py-1 rounded-full text-xs font-bold bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">SLIDE 01</span>
+        <span className="text-xs font-mono text-gray-400">IGL VISIONGUARD AI v1.0.0</span>
+      </div>
+
+      <div className="space-y-3">
+        <h2 className="text-3xl font-extrabold text-white tracking-tight">Industrial AI Safety & Packaging Quality Intelligence</h2>
+        <p className="text-sm text-gray-300 leading-relaxed max-w-3xl">
+          Real-time industrial computer vision platform combining **HSE Safety Compliance** (Person Tracking, PPE Helmet ML Verification, Two-Pass Mobile Phone Misuse Siren Escalation, Dangerous Zone Boundaries) and **Conveyor Packaging Quality Control** (Fill-Level, Cap Integrity & Surface Defect Checks).
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 text-xs">
+        <div className="p-4 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-1">
+          <div className="font-bold text-cyan-400">Frontend Stack</div>
+          <div className="text-gray-300">React + Vite + Tailwind CSS + Lucide Icons</div>
+        </div>
+        <div className="p-4 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-1">
+          <div className="font-bold text-emerald-400">AI Computer Vision</div>
+          <div className="text-gray-300">TensorFlow.js + COCO-SSD (MobileNetV2) + Custom ML</div>
+        </div>
+        <div className="p-4 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-1">
+          <div className="font-bold text-purple-400">Backend Server</div>
+          <div className="text-gray-300">Python FastAPI + SQLite Database (igl_safety.db)</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 2: Two-Pass Phone Detection Architecture -->
+    <section className="slide glass-card rounded-3xl p-8 space-y-6 border-l-4 border-l-amber-500">
+      <div className="flex items-center justify-between">
+        <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">SLIDE 02</span>
+        <span className="text-xs font-mono text-gray-400">AI DETECTION PIPELINE</span>
+      </div>
+
+      <h2 className="text-2xl font-bold text-white">Two-Pass Mobile Phone Misuse Detection Engine</h2>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs">
+        <div className="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-3">
+          <h3 className="font-bold text-amber-400 text-sm">Pass 1: Full-Frame Inference</h3>
+          <p className="text-gray-300">Runs COCO-SSD on raw camera video at low confidence cutoff (<code className="text-amber-300 bg-gray-950 px-1 rounded">0.15</code>) to extract all person detections and candidate objects.</p>
+        </div>
+        <div className="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-3">
+          <h3 className="font-bold text-cyan-400 text-sm">Pass 2: Upper-Body ROI Crop & Zoom</h3>
+          <p className="text-gray-300">Crops person head, ears, face, chest & hands region (+20% margins), upscales to <code className="text-cyan-300 bg-gray-950 px-1 rounded">360x360</code> offscreen canvas, and re-runs COCO-SSD to detect small phones near ears/face.</p>
+        </div>
+      </div>
+
+      <div className="p-4 rounded-2xl bg-gray-950 border border-gray-800 text-xs font-mono space-y-1">
+        <div className="text-emerald-400 font-bold">=== REAL-TIME DIAGNOSTIC LOGS ===</div>
+        <div>FULL FRAME PHONE DETECTIONS: [{ class: "cell phone", confidence: 0.18 }]</div>
+        <div>ROI PHONE DETECTIONS: [{ class: "cell phone", confidence: 0.89 }]</div>
+        <div>COMBINED DETECTIONS: Merged via IoU (>0.30 Overlap Deduplication)</div>
+      </div>
+    </section>
+
+    <!-- SLIDE 3: Dedicated Helmet ML Verification -->
+    <section className="slide glass-card rounded-3xl p-8 space-y-6 border-l-4 border-l-emerald-500">
+      <div className="flex items-center justify-between">
+        <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">SLIDE 03</span>
+        <span className="text-xs font-mono text-gray-400">PPE HELMET INSPECTION</span>
+      </div>
+
+      <h2 className="text-2xl font-bold text-white">Per-Person Dedicated ML Helmet Verification</h2>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+        <div className="p-4 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-2">
+          <div className="font-bold text-gray-200">1. Head Crop Tensor</div>
+          <p className="text-gray-400">Crops top 25% head region of tracked person box & resizes to 224x224 tensor.</p>
+        </div>
+        <div className="p-4 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-2">
+          <div className="font-bold text-amber-400">2. Conservative Default</div>
+          <p className="text-gray-400">Strictly defaults to <code className="text-red-400">hasHelmet: false</code> if custom model files are unsupplied or score &lt; 0.65.</p>
+        </div>
+        <div className="p-4 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-2">
+          <div className="font-bold text-emerald-400">3. Temporal Memory</div>
+          <p className="text-gray-400">Requires 3 consecutive persistence frames + 3 miss grace frames to prevent flickering.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 4: Packaging Quality Inspection Module -->
+    <section className="slide glass-card rounded-3xl p-8 space-y-6 border-l-4 border-l-purple-500">
+      <div className="flex items-center justify-between">
+        <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30">SLIDE 04</span>
+        <span className="text-xs font-mono text-gray-400">CONVEYOR QUALITY CONTROL</span>
+      </div>
+
+      <h2 className="text-2xl font-bold text-white">Conveyor Bottle Packaging Quality Control Dashboard</h2>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+        <div className="p-3.5 rounded-xl bg-gray-900 border border-gray-800 text-center">
+          <div className="text-gray-400 text-[10px]">Fill-Level Inspection</div>
+          <div className="text-sm font-bold text-cyan-400 mt-1">PASS / LOW / HIGH</div>
+        </div>
+        <div className="p-3.5 rounded-xl bg-gray-900 border border-gray-800 text-center">
+          <div className="text-gray-400 text-[10px]">Cap Integrity Check</div>
+          <div className="text-sm font-bold text-emerald-400 mt-1">PASS / MISSING / DAMAGED</div>
+        </div>
+        <div className="p-3.5 rounded-xl bg-gray-900 border border-gray-800 text-center">
+          <div className="text-gray-400 text-[10px]">Bottle Body Surface</div>
+          <div className="text-sm font-bold text-amber-400 mt-1">PASS / ANOMALY</div>
+        </div>
+        <div className="p-3.5 rounded-xl bg-gray-900 border border-gray-800 text-center">
+          <div className="text-gray-400 text-[10px]">Quality Decision</div>
+          <div className="text-sm font-bold text-purple-400 mt-1">ACCEPT vs REJECT</div>
+        </div>
+      </div>
+
+      <div className="p-5 rounded-2xl bg-gray-950 border border-gray-800 space-y-2 text-xs">
+        <div className="font-bold text-purple-300">Modular Industrial Hardware Integration:</div>
+        <p className="text-gray-400">Designed with clear simulation hooks in <code className="text-purple-300">packagingProcessor.js</code> so real 3D depth cameras, line encoders, and TensorRT reject jet actuators connect seamlessly.</p>
+      </div>
+    </section>
+
+    <!-- SLIDE 5: Dangerous Zone Boundary & Proximity Radar -->
+    <section className="slide glass-card rounded-3xl p-8 space-y-6 border-l-4 border-l-red-500">
+      <div className="flex items-center justify-between">
+        <span className="px-3 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">SLIDE 05</span>
+        <span className="text-xs font-mono text-gray-400">GEOFENCING & NEAR-MISS</span>
+      </div>
+
+      <h2 className="text-2xl font-bold text-white">Dangerous Zone Boundary Box & Distance Radar</h2>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs">
+        <div className="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-2">
+          <h3 className="font-bold text-red-400 text-sm">Dangerous Zone Boundary Box (Geofence)</h3>
+          <p className="text-gray-300">Polygon boundaries drawn on camera screens (e.g. High-Voltage Transformer Area) trigger instant alerts & siren when workers step inside using Ray-casting point-in-polygon math.</p>
+        </div>
+        <div className="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 space-y-2">
+          <h3 className="font-bold text-cyan-400 text-sm">Worker-Vehicle Distance Radar</h3>
+          <p className="text-gray-300">Live distance measurement between forklifts/machinery and workers on foot with dynamic slider movement (0.2m DANGER to 3.0m SAFE) and perimeter risk badges.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- SLIDE 6: All Modules Overview -->
+    <section className="slide glass-card rounded-3xl p-8 space-y-6 border-l-4 border-l-blue-500">
+      <div className="flex items-center justify-between">
+        <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30">SLIDE 06</span>
+        <span className="text-xs font-mono text-gray-400">APPLICATION MODULES</span>
+      </div>
+
+      <h2 className="text-2xl font-bold text-white">Complete 10-Module Application Sitemap</h2>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">1. Overview</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">2. Camera Setup</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">3. Live Monitoring</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-cyan-400">4. Packaging Inspection</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">5. Safety Events</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">6. Near Miss</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">7. Incidents</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">8. Analytics</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">9. Camera & AI Health</div>
+        <div className="p-3 rounded-xl bg-gray-900 border border-gray-800 font-semibold text-gray-200">10. Configuration</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer className="no-print border-t border-gray-800 bg-gray-950 p-6 text-center text-xs text-gray-400">
+    IGL VisionGuard AI — System Workflow & Technical Presentation Slide Deck • GitHub Repository: <a href="https://github.com/Shiv-Kumar005023/IGL.git" target="_blank" className="text-cyan-400 hover:underline">Shiv-Kumar005023/IGL</a>
+  </footer>
+
+</body>
+</html>
