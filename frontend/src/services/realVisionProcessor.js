@@ -281,75 +281,182 @@ export function captureCanvasSnapshot(canvas, overlayText = "") {
 }
 
 /**
- * Computer Vision Helmet Inspection Algorithm:
- * Crops top 25% head region of target bounding box [x, y, w, h] from live canvas.
+ * // FIX & IMPROVED: Strict & Conservative Computer Vision Hardhat Inspection Algorithm.
+ * 
+ * PRODUCTION LIMITATION NOTICE:
+ * Standard COCO-SSD object detection models (MobileNet) do NOT contain a custom 'hardhat' / 'safety helmet' class.
+ * Reliable production-grade PPE helmet verification requires a fine-tuned ML model (e.g. YOLOv8 / Faster R-CNN)
+ * trained specifically on industrial hardhat datasets.
+ * 
+ * This classical computer-vision heuristic is designed to be STRICT & CONSERVATIVE:
+ * - It strictly prefers 'hasHelmet: false' when visual evidence is uncertain.
+ * - It analyzes a smaller, head-dome focused ROI (top 16% of person box) to prevent hair/clothes interference.
+ * - It enforces multi-attribute checks: Plastic HSV Saturation, Top-Region Concentration, and Spatial Clustered Pixel Density.
  */
 export function inspectHelmetAndPersonsInCanvas(canvas, box) {
-  if (!canvas) return { hasHelmet: true, confidence: 0.92, reason: "Default baseline" };
+  // // FIX: Conservative Rule - Never assume helmet = true when canvas or box is uninitialized
+  if (!canvas || !box || box.length < 4) {
+    return {
+      hasHelmet: false,
+      confidence: 0.50,
+      reason: "MISSING HELMET: Canvas or bounding box uninitialized",
+      diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
+    };
+  }
 
   try {
     const ctx = canvas.getContext("2d");
     const width = canvas.width || 640;
     const height = canvas.height || 360;
 
-    const hx = Math.max(0, Math.floor(box[0] * width));
-    const hy = Math.max(0, Math.floor(box[1] * height));
-    const hw = Math.max(10, Math.floor(box[2] * width));
-    const hh = Math.max(10, Math.floor(box[3] * height * 0.25));
-
-    const imgData = ctx.getImageData(hx, hy, hw, hh);
-    const data = imgData.data;
-
-    let hardhatPixelCount = 0;
-    let totalPixels = data.length / 4;
-
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-
-      const max = Math.max(r, g, b);
-      const min = Math.min(r, g, b);
-      const d = max - min;
-
-      let h = 0;
-      if (d !== 0) {
-        if (max === r) h = ((g - b) / d) % 6;
-        else if (max === g) h = (b - r) / d + 2;
-        else h = (r - g) / d + 4;
-        h = Math.round(h * 60);
-        if (h < 0) h += 360;
-      }
-
-      const s = max === 0 ? 0 : d / max;
-      const v = max / 255;
-
-      const isYellowOrange = h >= 15 && h <= 55 && s > 0.35 && v > 0.40;
-      const isRedHelmet = (h <= 15 || h >= 345) && s > 0.45 && v > 0.35;
-      const isWhiteBlueHelmet = (h >= 180 && h <= 240 && s > 0.30) || (s < 0.15 && v > 0.75);
-
-      if (isYellowOrange || isRedHelmet || isWhiteBlueHelmet) {
-        hardhatPixelCount++;
-      }
-    }
-
-    const hardhatRatio = hardhatPixelCount / totalPixels;
-
-    if (hardhatRatio > 0.18) {
-      return {
-        hasHelmet: true,
-        confidence: Math.min(0.99, Math.round((0.85 + hardhatRatio * 0.3) * 100) / 100),
-        reason: `HARDHAT DETECTED: Safety helmet plastic detected (${Math.round(hardhatRatio * 100)}%)`
-      };
-    } else {
+    if (width === 0 || height === 0) {
       return {
         hasHelmet: false,
-        confidence: Math.min(0.98, Math.round((0.88 + (1 - hardhatRatio) * 0.1) * 100) / 100),
-        reason: `MISSING HELMET: Hair/skin detected in head ROI (${Math.round(hardhatRatio * 100)}%)`
+        confidence: 0.50,
+        reason: "MISSING HELMET: Zero canvas dimensions",
+        diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
       };
     }
+
+    // // FIX: Clamp bounding-box coordinates to prevent getImageData invalid arguments
+    const bx = Math.max(0, Math.min(width - 1, Math.floor(box[0] * width)));
+    const by = Math.max(0, Math.min(height - 1, Math.floor(box[1] * height)));
+    const bw = Math.max(10, Math.min(width - bx, Math.floor(box[2] * width)));
+    const personH = Math.floor(box[3] * height);
+
+    // // IMPROVED: Analyze smaller, head-dome focused ROI (top 16% of person box instead of top 25%)
+    const hh = Math.max(8, Math.min(height - by, Math.floor(personH * 0.16)));
+
+    if (bw < 8 || hh < 8) {
+      return {
+        hasHelmet: false,
+        confidence: 0.55,
+        reason: "MISSING HELMET: Head ROI too small for visual verification",
+        diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
+      };
+    }
+
+    const imgData = ctx.getImageData(bx, by, bw, hh);
+    const data = imgData.data;
+    const totalPixels = bw * hh;
+
+    if (totalPixels === 0) {
+      return {
+        hasHelmet: false,
+        confidence: 0.50,
+        reason: "MISSING HELMET: Zero pixel head ROI",
+        diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
+      };
+    }
+
+    // // NEW: Configurable Conservative Heuristic Thresholds
+    const helmetColorRatioThreshold = 0.30;     // At least 30% of head dome must be hardhat plastic color
+    const helmetUpperRegionThreshold = 0.45;    // At least 45% of hardhat pixels must be in top half of head ROI
+    const spatialClusterThreshold = 0.25;        // At least 25% contiguous cluster density
+
+    let hardhatPixelCount = 0;
+    let upperHalfHardhatPixels = 0;
+    const midY = Math.floor(hh / 2);
+
+    // Grid map for 2x2 contiguous spatial clustering test
+    const grid = new Uint8Array(bw * hh);
+
+    let idx = 0;
+    for (let y = 0; y < hh; y++) {
+      for (let x = 0; x < bw; x++) {
+        const pIdx = (y * bw + x) * 4;
+        const r = data[pIdx];
+        const g = data[pIdx + 1];
+        const b = data[pIdx + 2];
+
+        // RGB to HSV
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const d = max - min;
+
+        let h = 0;
+        if (d !== 0) {
+          if (max === r) h = ((g - b) / d) % 6;
+          else if (max === g) h = (b - r) / d + 2;
+          else h = (r - g) / d + 4;
+          h = Math.round(h * 60);
+          if (h < 0) h += 360;
+        }
+
+        const s = max === 0 ? 0 : d / max;
+        const v = max / 255;
+
+        // Hardhat Plastic Reflection Thresholds (Yellow/Orange, Red, White/Blue)
+        const isYellowOrange = h >= 15 && h <= 55 && s > 0.40 && v > 0.45;
+        const isRedHelmet = (h <= 12 || h >= 348) && s > 0.50 && v > 0.40;
+        const isWhiteBlueHelmet = (h >= 180 && h <= 240 && s > 0.35) || (s < 0.12 && v > 0.82);
+
+        if (isYellowOrange || isRedHelmet || isWhiteBlueHelmet) {
+          hardhatPixelCount++;
+          grid[idx] = 1;
+          if (y < midY) {
+            upperHalfHardhatPixels++;
+          }
+        }
+        idx++;
+      }
+    }
+
+    // 1. Overall Hardhat Color Ratio
+    const colorRatio = Math.round((hardhatPixelCount / totalPixels) * 100) / 100;
+
+    // 2. Upper Region Concentration (Hardhat plastic is concentrated on the top dome)
+    const upperRegionRatio = hardhatPixelCount > 0
+      ? Math.round((upperHalfHardhatPixels / hardhatPixelCount) * 100) / 100
+      : 0;
+
+    // 3. Spatial Clustered Density Test (Filtering out isolated random noise pixels)
+    let clusteredPixels = 0;
+    for (let y = 0; y < hh - 1; y++) {
+      for (let x = 0; x < bw - 1; x++) {
+        const i = y * bw + x;
+        if (grid[i] === 1 && (grid[i + 1] === 1 || grid[i + bw] === 1)) {
+          clusteredPixels++;
+        }
+      }
+    }
+    const spatialScore = Math.round((clusteredPixels / totalPixels) * 100) / 100;
+
+    // // IMPROVED: CONSERVATIVE DECISION LOGIC - Requires ALL 3 criteria to be satisfied
+    const passesColor = colorRatio >= helmetColorRatioThreshold;
+    const passesUpperRegion = upperRegionRatio >= helmetUpperRegionThreshold;
+    const passesSpatialCluster = spatialScore >= spatialClusterThreshold;
+
+    const hasHelmet = passesColor && passesUpperRegion && passesSpatialCluster;
+
+    // // FIX: Realistic confidence calculation reflecting heuristic evidence (not fake 0.98)
+    const confidence = hasHelmet
+      ? Math.min(0.88, Math.round((0.65 + colorRatio * 0.25) * 100) / 100)
+      : Math.min(0.85, Math.round((0.60 + (1 - colorRatio) * 0.25) * 100) / 100);
+
+    const reason = hasHelmet
+      ? "HARDHAT DETECTED: Strong helmet-like visual evidence"
+      : "MISSING HELMET: No sufficient helmet evidence";
+
+    return {
+      hasHelmet,
+      confidence,
+      reason,
+      diagnostics: {
+        colorRatio,
+        upperRegionRatio,
+        spatialScore
+      }
+    };
+
   } catch (err) {
-    return { hasHelmet: true, confidence: 0.90, reason: `Head ROI error: ${err.message}` };
+    // // FIX: CONSERVATIVE RULE - On error, NEVER assume helmet = true
+    return {
+      hasHelmet: false,
+      confidence: 0.50,
+      reason: `Helmet detection unavailable (${err.message})`,
+      diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
+    };
   }
 }
 
