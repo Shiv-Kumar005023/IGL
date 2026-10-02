@@ -52,6 +52,42 @@ let sirenOscillator = null;
 let sirenGain = null;
 let sirenInterval = null;
 
+// Reusable Offscreen Canvas for Two-Pass ROI Phone Detection
+let reusableRoiCanvas = null;
+let reusableRoiCtx = null;
+
+function getRoiCanvas(targetWidth, targetHeight) {
+  if (typeof document === "undefined") return { canvas: null, ctx: null };
+  if (!reusableRoiCanvas) {
+    reusableRoiCanvas = document.createElement("canvas");
+    reusableRoiCtx = reusableRoiCanvas.getContext("2d", { willReadFrequently: true });
+  }
+  reusableRoiCanvas.width = targetWidth;
+  reusableRoiCanvas.height = targetHeight;
+  return { canvas: reusableRoiCanvas, ctx: reusableRoiCtx };
+}
+
+/**
+ * Calculate Intersection over Union (IoU) between two bounding boxes [x, y, w, h]
+ */
+function calculateIoU(boxA, boxB) {
+  const xA = Math.max(boxA[0], boxB[0]);
+  const yA = Math.max(boxA[1], boxB[1]);
+  const xB = Math.min(boxA[0] + boxA[2], boxB[0] + boxB[2]);
+  const yB = Math.min(boxA[1] + boxA[3], boxB[1] + boxB[3]);
+
+  const interWidth = Math.max(0, xB - xA);
+  const interHeight = Math.max(0, yB - yA);
+  const interArea = interWidth * interHeight;
+
+  if (interArea === 0) return 0;
+
+  const boxAArea = boxA[2] * boxA[3];
+  const boxBArea = boxB[2] * boxB[3];
+
+  return interArea / (boxAArea + boxBArea - interArea);
+}
+
 // ============================================================================
 // PART 2: TensorFlow.js Model Loaders (COCO-SSD & Custom Helmet ML Model)
 // ============================================================================
@@ -262,7 +298,7 @@ export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config
     tensorToDispose.push(predictionTensor);
 
     const scores = await predictionTensor.data();
-    
+
     // Interpret output score (class 0: helmet, class 1: no_helmet or single sigmoid output)
     let rawScore = 0.0;
     if (scores.length >= 2) {
@@ -298,7 +334,7 @@ export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config
     tensorToDispose.forEach((t) => {
       try {
         if (t && t.dispose) t.dispose();
-      } catch (e) {}
+      } catch (e) { }
     });
   }
 }
@@ -547,13 +583,13 @@ export function stopSirenAlarm() {
     try {
       sirenOscillator.stop();
       sirenOscillator.disconnect();
-    } catch (e) {}
+    } catch (e) { }
     sirenOscillator = null;
   }
   if (sirenGain) {
     try {
       sirenGain.disconnect();
-    } catch (e) {}
+    } catch (e) { }
     sirenGain = null;
   }
 }
@@ -629,7 +665,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
 
     // Run TensorFlow COCO-SSD Inference with LOW score threshold (0.15) to capture small objects
     const rawPredictions = await cocoModel.detect(videoOrCanvas, 25, 0.15);
-
+    console.log("🔥 DETECTION FUNCTION RUNNING", rawPredictions);
     console.log(
       "ALL AI DETECTIONS:",
       rawPredictions.map((p) => ({
@@ -778,12 +814,128 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
 
     activeTracks = activeTracks.filter((tr) => now - tr.lastSeen < 3000);
 
+    // =========================================================================
+    // TWO-PASS PHONE DETECTION: PASS 2 (ENLARGED PERSON UPPER-BODY ROI CROP)
+    // =========================================================================
+    const roiPhoneDetections = [];
+
+    if (personDetections.length > 0 && typeof document !== "undefined") {
+      const { canvas: roiCanvas, ctx: roiCtx } = getRoiCanvas(360, 360);
+
+      for (let pDet of personDetections) {
+        const [px, py, pw, ph] = pDet.bbox;
+
+        // Expanded upper-body ROI covering head, ear, face, chest, and hands
+        const cropX1 = Math.max(0, Math.floor(px - pw * 0.20));
+        const cropY1 = Math.max(0, Math.floor(py - ph * 0.15));
+        const cropX2 = Math.min(width, Math.ceil(px + pw * 1.20));
+        const cropY2 = Math.min(height, Math.ceil(py + ph * 0.75));
+        const cropW = cropX2 - cropX1;
+        const cropH = cropY2 - cropY1;
+
+        if (cropW >= 30 && cropH >= 30 && roiCtx) {
+          roiCtx.clearRect(0, 0, 360, 360);
+          roiCtx.drawImage(videoOrCanvas, cropX1, cropY1, cropW, cropH, 0, 0, 360, 360);
+
+          // Run COCO-SSD on zoomed/enlarged ROI canvas
+          const roiRawPreds = await cocoModel.detect(roiCanvas, 10, 0.15);
+
+          for (let roiP of roiRawPreds) {
+            if (
+              (roiP.class === "cell phone" || roiP.class === "mobile phone" || roiP.class === "phone") &&
+              roiP.score >= 0.15
+            ) {
+              // Convert ROI coordinates back to full-frame coordinates
+              const [rx, ry, rw, rh] = roiP.bbox;
+              const fullX = cropX1 + (rx / 360) * cropW;
+              const fullY = cropY1 + (ry / 360) * cropH;
+              const fullW = (rw / 360) * cropW;
+              const fullH = (rh / 360) * cropH;
+
+              roiPhoneDetections.push({
+                class: roiP.class,
+                score: roiP.score,
+                bbox: [fullX, fullY, fullW, fullH],
+                source: "ROI"
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Combine Full-Frame Detections (Pass 1) & ROI Detections (Pass 2) with IoU Deduplication
+    const combinedPhoneDetections = rawPhoneDetections.map((p) => ({
+      class: p.class,
+      score: p.score,
+      bbox: p.bbox,
+      source: "FULL_FRAME"
+    }));
+
+    roiPhoneDetections.forEach((rPhone) => {
+      let duplicateIndex = -1;
+      for (let i = 0; i < combinedPhoneDetections.length; i++) {
+        const existing = combinedPhoneDetections[i];
+        const iou = calculateIoU(existing.bbox, rPhone.bbox);
+        if (iou > 0.30) {
+          duplicateIndex = i;
+          break;
+        }
+      }
+
+      if (duplicateIndex >= 0) {
+        if (rPhone.score > combinedPhoneDetections[duplicateIndex].score) {
+          combinedPhoneDetections[duplicateIndex] = {
+            class: rPhone.class,
+            score: rPhone.score,
+            bbox: rPhone.bbox,
+            source: "ROI_ENHANCED"
+          };
+        }
+      } else {
+        combinedPhoneDetections.push({
+          class: rPhone.class,
+          score: rPhone.score,
+          bbox: rPhone.bbox,
+          source: "ROI"
+        });
+      }
+    });
+
+    // Console Diagnostics Output
+    console.log("=== TWO-PASS PHONE DETECTION DIAGNOSTICS ===");
+    console.log(
+      "FULL FRAME PHONE DETECTIONS:",
+      rawPhoneDetections.map((p) => ({
+        class: p.class,
+        confidence: Math.round(p.score * 100) / 100,
+        bbox: p.bbox.map((v) => Math.round(v))
+      }))
+    );
+    console.log(
+      "ROI PHONE DETECTIONS:",
+      roiPhoneDetections.map((p) => ({
+        class: p.class,
+        confidence: Math.round(p.score * 100) / 100,
+        bbox: p.bbox.map((v) => Math.round(v))
+      }))
+    );
+    console.log(
+      "COMBINED PHONE DETECTIONS:",
+      combinedPhoneDetections.map((p) => ({
+        class: p.class,
+        confidence: Math.round(p.score * 100) / 100,
+        bbox: p.bbox.map((v) => Math.round(v)),
+        source: p.source
+      }))
+    );
+
     // 4. Person-Phone Spatial Association (Nearest-Person Distance Sorting)
     const validPhoneCandidates = [];
     const normalizedPhones = [];
     const candidatePairings = [];
 
-    rawPhoneDetections.forEach((phoneDet, pIdx) => {
+    combinedPhoneDetections.forEach((phoneDet, pIdx) => {
       const score = phoneDet.score;
       const pNormBox = [
         Math.max(0, phoneDet.bbox[0] / width),
@@ -873,6 +1025,10 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
           class: pair.phoneClass
         });
 
+        console.log(
+          `ASSOCIATED PHONE: Class ${pair.phoneClass} (Conf: ${Math.round(pair.phoneScore * 100)}%) -> Worker Track ID: ${targetPerson.trackId}`
+        );
+
         validPhoneCandidates.push({
           class: pair.phoneClass,
           score: Math.round(pair.phoneScore * 100) / 100,
@@ -958,10 +1114,10 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
             state.warningLevel === 1
               ? "⚠️ Warning 1: Mobile phone usage detected. Please stop phone usage."
               : state.warningLevel === 2
-              ? "⚠️ Warning 2: Continued mobile phone usage detected."
-              : state.warningLevel >= 3
-              ? "⚠️ Final Warning: Siren Activated! Please stop mobile phone usage immediately."
-              : "Detecting phone interaction..."
+                ? "⚠️ Warning 2: Continued mobile phone usage detected."
+                : state.warningLevel >= 3
+                  ? "⚠️ Final Warning: Siren Activated! Please stop mobile phone usage immediately."
+                  : "Detecting phone interaction..."
         };
 
       } else {
