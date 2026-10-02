@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Camera, Radio, Upload, AlertCircle, RefreshCw, Users } from "lucide-react";
+import { Camera, Radio, Upload, AlertCircle, RefreshCw, Users, FlipHorizontal } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 import { analyzeFrameQuality } from "../services/realVisionProcessor";
 
@@ -22,6 +22,7 @@ export default function CameraInputView() {
   const [cameraName, setCameraName] = useState("Factory Storage Bay Camera");
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState(null);
+  const [isMirrored, setIsMirrored] = useState(true); // Horizontal mirror flip toggle
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -267,12 +268,24 @@ export default function CameraInputView() {
           </div>
 
           {streamSource && (
-            <button
-              onClick={disconnectStream}
-              className="px-3 py-1.5 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 text-xs font-semibold"
-            >
-              Turn Off Camera
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsMirrored(!isMirrored)}
+                className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition ${
+                  isMirrored ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30" : "text-slate-400 bg-slate-800 border border-slate-700"
+                }`}
+              >
+                <FlipHorizontal className="w-3.5 h-3.5" />
+                <span>Mirror View ({isMirrored ? "ON" : "OFF"})</span>
+              </button>
+
+              <button
+                onClick={disconnectStream}
+                className="px-3 py-1.5 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 text-xs font-semibold"
+              >
+                Turn Off Camera
+              </button>
+            </div>
           )}
         </div>
 
@@ -284,7 +297,9 @@ export default function CameraInputView() {
             playsInline
             muted
             controls={streamSource?.type === "file"}
-            className="w-full h-full object-contain"
+            className={`w-full h-full object-contain transition-transform duration-300 ${
+              isMirrored ? "-scale-x-100" : ""
+            }`}
           />
           <canvas ref={canvasRef} className="hidden" />
 
