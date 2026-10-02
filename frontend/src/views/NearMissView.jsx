@@ -96,23 +96,23 @@ export default function NearMissView() {
                     style={{
                       left: "50%",
                       top: "50%",
-                      width: "36%",
-                      height: "44%",
+                      width: "38%",
+                      height: "46%",
                       transform: "translate(-50%, -50%)"
                     }}
                   >
-                    <span className="text-[9px] font-mono font-bold text-red-400/90 bg-slate-950/80 px-1 rounded border border-red-500/40">
-                      SAFETY BOUNDARY (2.0m)
+                    <span className="text-[9px] font-mono font-bold text-red-400/90 bg-slate-950/90 px-1.5 py-0.5 rounded border border-red-500/40">
+                      DANGEROUS ZONE BOUNDARY (2.0m)
                     </span>
                   </div>
 
-                  {/* Vehicle Icon Node */}
+                  {/* Vehicle / Danger Zone Icon Node */}
                   <div
                     className="absolute p-2.5 rounded-xl bg-blue-600/30 border-2 border-blue-400 text-blue-300 text-[10px] font-bold shadow-lg flex items-center gap-1.5 z-10"
                     style={{ left: `${vehicleX}%`, top: `${vehicleY}%`, transform: "translate(-50%, -50%)" }}
                   >
                     <div className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
-                    <span>{vehicleId}</span>
+                    <span>DANGER ZONE: {vehicleId}</span>
                   </div>
 
                   {/* Worker Icon Node (Positioned dynamically based on measuredDist slider) */}
@@ -127,7 +127,7 @@ export default function NearMissView() {
                     style={{ left: `${workerX}%`, top: `${workerY}%`, transform: "translate(-50%, -50%)" }}
                   >
                     <div className={`w-2 h-2 rounded-full ${isDanger ? "bg-red-400 animate-ping" : "bg-emerald-400"}`} />
-                    <span>{workerId}</span>
+                    <span>WORKER: {workerId}</span>
                   </div>
 
                   {/* Dynamic Proximity Line connecting Vehicle & Worker */}
@@ -169,11 +169,11 @@ export default function NearMissView() {
 
         {/* Distance Controls */}
         <div className="p-6 rounded-2xl glass-panel space-y-4 text-xs">
-          <h2 className="text-sm font-bold text-slate-200">Test Distance Settings</h2>
+          <h2 className="text-sm font-bold text-slate-200">Test Distance & Boundary Settings</h2>
 
           <div className="space-y-4">
             <div className="space-y-1">
-              <label className="text-slate-400 text-[11px]">Worker Distance from Vehicle (Meters):</label>
+              <label className="text-slate-400 text-[11px]">Worker Distance from Boundary (Meters):</label>
               <input
                 type="range"
                 min="0.2"
@@ -191,22 +191,24 @@ export default function NearMissView() {
             </div>
 
             <div className="space-y-1">
-              <label className="text-slate-400 text-[11px]">Vehicle Name / ID:</label>
+              <label className="text-slate-400 text-[11px]">Dangerous Zone / Vehicle Boundary Name:</label>
               <input
                 type="text"
                 value={vehicleId}
                 onChange={(e) => setVehicleId(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none"
+                placeholder="e.g. High-Voltage Transformer Boundary"
+                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-cyan-500 font-semibold"
               />
             </div>
 
             <div className="space-y-1">
-              <label className="text-slate-400 text-[11px]">Worker Name / Track ID:</label>
+              <label className="text-slate-400 text-[11px]">Worker / Personnel Track ID:</label>
               <input
                 type="text"
                 value={workerId}
                 onChange={(e) => setWorkerId(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none"
+                placeholder="e.g. Worker #104"
+                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-cyan-500 font-semibold"
               />
             </div>
           </div>
