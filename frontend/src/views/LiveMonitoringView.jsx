@@ -15,7 +15,8 @@ import {
   AlertOctagon,
   CheckCircle2,
   Bug,
-  Activity
+  Activity,
+  FlipHorizontal
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 import {
@@ -45,6 +46,7 @@ export default function LiveMonitoringView() {
   const [showBoxes, setShowBoxes] = useState(true);
   const [showZones, setShowZones] = useState(true);
   const [showDistances, setShowDistances] = useState(true);
+  const [isMirrored, setIsMirrored] = useState(true); // Horizontal mirror flip toggle
 
   // Model & Detection State
   const [modelInfo, setModelInfo] = useState({ status: "UNINITIALIZED", errorMessage: "" });
@@ -130,17 +132,32 @@ export default function LiveMonitoringView() {
         const width = canvas.width;
         const height = canvas.height;
 
-        // Draw current video frame onto canvas at 60 FPS
-        ctx.drawImage(video, 0, 0, width, height);
+        // Draw current video frame onto canvas at 60 FPS (with optional horizontal mirror transform)
+        if (isMirrored) {
+          ctx.save();
+          ctx.translate(width, 0);
+          ctx.scale(-1, 1);
+          ctx.drawImage(video, 0, 0, width, height);
+          ctx.restore();
+        } else {
+          ctx.drawImage(video, 0, 0, width, height);
+        }
 
         // 1. Draw Restricted Zones (Polygons)
         if (showZones && restrictedZones.length > 0) {
           restrictedZones.forEach((zone) => {
             if (zone.polygon_coords && zone.polygon_coords.length > 2) {
               ctx.beginPath();
-              ctx.moveTo(zone.polygon_coords[0][0] * width, zone.polygon_coords[0][1] * height);
+              const startX = isMirrored
+                ? (1 - zone.polygon_coords[0][0]) * width
+                : zone.polygon_coords[0][0] * width;
+              ctx.moveTo(startX, zone.polygon_coords[0][1] * height);
+
               for (let i = 1; i < zone.polygon_coords.length; i++) {
-                ctx.lineTo(zone.polygon_coords[i][0] * width, zone.polygon_coords[i][1] * height);
+                const zx = isMirrored
+                  ? (1 - zone.polygon_coords[i][0]) * width
+                  : zone.polygon_coords[i][0] * width;
+                ctx.lineTo(zx, zone.polygon_coords[i][1] * height);
               }
               ctx.closePath();
               ctx.fillStyle = "rgba(239, 68, 68, 0.18)";
@@ -155,7 +172,7 @@ export default function LiveMonitoringView() {
               ctx.font = "bold 12px sans-serif";
               ctx.fillText(
                 `RESTRICTED AREA: ${zone.zone_name}`,
-                zone.polygon_coords[0][0] * width + 5,
+                startX + 5,
                 zone.polygon_coords[0][1] * height + 15
               );
             }
@@ -243,7 +260,8 @@ export default function LiveMonitoringView() {
           for (let i = 0; i < activePersons.length; i++) {
             const pObj = activePersons[i];
             const p = pObj.box;
-            const px = p[0] * width, py = p[1] * height, pw = p[2] * width, ph = p[3] * height;
+            const px = isMirrored ? width - (p[0] + p[2]) * width : p[0] * width;
+            const py = p[1] * height, pw = p[2] * width, ph = p[3] * height;
 
             const boxColor = pObj.isUsingPhone ? "#f59e0b" : pObj.color;
             ctx.strokeStyle = boxColor;
@@ -274,7 +292,8 @@ export default function LiveMonitoringView() {
           for (let j = 0; j < activePhones.length; j++) {
             const phObj = activePhones[j];
             const phBox = phObj.box;
-            const phx = phBox[0] * width, phy = phBox[1] * height, phw = phBox[2] * width, phh = phBox[3] * height;
+            const phx = isMirrored ? width - (phBox[0] + phBox[2]) * width : phBox[0] * width;
+            const phy = phBox[1] * height, phw = phBox[2] * width, phh = phBox[3] * height;
 
             ctx.strokeStyle = "#06b6d4";
             ctx.lineWidth = 2.5;
@@ -316,7 +335,7 @@ export default function LiveMonitoringView() {
     }
 
     return () => cancelAnimationFrame(animId);
-  }, [streamSource, showBoxes, showZones, showDistances, restrictedZones, personCount, config]);
+  }, [streamSource, showBoxes, showZones, showDistances, isMirrored, restrictedZones, personCount, config]);
 
   // Capture Canvas Snapshot and Dispatch Manual Incident Alert
   const handleCaptureEvidenceAlert = () => {
@@ -377,6 +396,16 @@ export default function LiveMonitoringView() {
           >
             {showDistances ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             <span>Show Distance Lines</span>
+          </button>
+
+          <button
+            onClick={() => setIsMirrored(!isMirrored)}
+            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
+              isMirrored ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30" : "text-slate-500"
+            }`}
+          >
+            <FlipHorizontal className="w-3.5 h-3.5" />
+            <span>Mirror View ({isMirrored ? "ON" : "OFF"})</span>
           </button>
         </div>
       </div>
