@@ -6,29 +6,45 @@
 import * as tf from "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
 
-// Global AI Model & State Handles
+// ============================================================================
+// PART 1: Global AI Model & State Handles (COCO-SSD & Dedicated Helmet ML Model)
+// ============================================================================
+
+// COCO-SSD Model Handles
 let cocoModel = null;
 let modelLoadingPromise = null;
 let modelStatus = "UNINITIALIZED"; // UNINITIALIZED, LOADING, READY, ERROR
 let modelErrorMessage = "";
 
+// PART 7: Configuration Values & Thresholds
+export const HELMET_MODEL_URL = "/models/helmet/model.json"; // Path to custom trained TFJS helmet model files
+export const HELMET_CONFIDENCE_THRESHOLD = 0.65;
+export const HELMET_PERSISTENCE_FRAMES = 3;
+export const HELMET_MISS_GRACE_FRAMES = 3;
+
+// PART 1: Dedicated Helmet ML Model Handles
+let helmetModel = null;
+let helmetModelLoadingPromise = null;
+let helmetModelStatus = "UNINITIALIZED"; // UNINITIALIZED, LOADING, READY, ERROR
+let helmetModelErrorMessage = "";
+
 // Track ID Generator & Track Memory Across Frames
 let nextTrackId = 101;
 let activeTracks = []; // [{ trackId, box: [x,y,w,h], center: [cx, cy], lastSeen: timestamp }]
 
-// // NEW & IMPROVED: Phone Misuse Persistent Verification State Map across frames
-// key: trackId -> {
-//   firstSeen: timestamp,
-//   lastSeen: timestamp,
-//   durationSec: number,
-//   warningLevel: number,
-//   sirenActive: boolean,
-//   lastWarningTime: timestamp,
-//   lastPhoneConfidence: number,
-//   persistenceCount: number, // consecutive frames with phone candidate
-//   missGraceCount: number    // grace frames for temporary 1-2 frame missed detections
-// }
+// Phone Misuse Persistent Verification State Map across frames
 const phoneMisuseState = new Map();
+
+// PART 4: Per-Person Helmet Verification Tracking State Map
+// key: trackId -> {
+//   hasHelmet: boolean,
+//   confidence: number,
+//   persistenceCount: number,
+//   missGraceCount: number,
+//   lastSeen: timestamp,
+//   reason: string
+// }
+const helmetVerificationState = new Map();
 
 // Siren Web Audio API Synthesizer Handle
 let sirenAudioContext = null;
@@ -36,9 +52,13 @@ let sirenOscillator = null;
 let sirenGain = null;
 let sirenInterval = null;
 
+// ============================================================================
+// PART 2: TensorFlow.js Model Loaders (COCO-SSD & Custom Helmet ML Model)
+// ============================================================================
+
 /**
  * Load TensorFlow COCO-SSD Model asynchronously
- * // IMPROVED: Prefers 'mobilenet_v2' for higher resolution feature extraction on small objects like cell phones.
+ * Prefers 'mobilenet_v2' for higher resolution feature extraction on small objects like cell phones.
  */
 export async function loadDetectionModel() {
   if (modelStatus === "READY" && cocoModel) {
@@ -54,10 +74,7 @@ export async function loadDetectionModel() {
 
   modelLoadingPromise = (async () => {
     try {
-      // Ensure TF backend is initialized
       await tf.ready();
-      
-      // // IMPROVED: Load COCO-SSD MobileNetV2 model for improved small object resolution
       try {
         cocoModel = await cocoSsd.load({
           base: "mobilenet_v2"
@@ -84,7 +101,7 @@ export async function loadDetectionModel() {
 }
 
 /**
- * Returns current status of the AI Model
+ * Returns current status of the COCO-SSD AI Model
  */
 export function getModelStatus() {
   return {
@@ -95,8 +112,220 @@ export function getModelStatus() {
 }
 
 /**
- * Frame Quality & Assessability Analyzer (Pitch Dark / Severe Blur / Occlusion)
+ * PART 2: Load Custom TensorFlow.js Dedicated Helmet/PPE ML Model asynchronously.
+ * Can be loaded from local static path (/models/helmet/model.json) or remote URL.
  */
+export async function loadHelmetDetectionModel(modelUrl = HELMET_MODEL_URL) {
+  if (helmetModelStatus === "READY" && helmetModel) {
+    return { success: true, model: helmetModel };
+  }
+
+  if (helmetModelStatus === "LOADING" && helmetModelLoadingPromise) {
+    return helmetModelLoadingPromise;
+  }
+
+  helmetModelStatus = "LOADING";
+  helmetModelErrorMessage = "";
+
+  helmetModelLoadingPromise = (async () => {
+    try {
+      await tf.ready();
+
+      // Try loading custom TFJS GraphModel or LayersModel
+      try {
+        helmetModel = await tf.loadGraphModel(modelUrl);
+      } catch (e1) {
+        try {
+          helmetModel = await tf.loadLayersModel(modelUrl);
+        } catch (e2) {
+          throw new Error(`Model file not found at ${modelUrl}`);
+        }
+      }
+
+      helmetModelStatus = "READY";
+      console.log(`✅ Dedicated Helmet ML Model Loaded Successfully from ${modelUrl}.`);
+      return { success: true, model: helmetModel };
+    } catch (err) {
+      helmetModelStatus = "ERROR";
+      helmetModelErrorMessage = `HELMET MODEL UNAVAILABLE: Trained ML helmet model files not found at ${modelUrl}. Conservative safety mode active (Default hasHelmet = false).`;
+      return { success: false, error: helmetModelErrorMessage };
+    }
+  })();
+
+  return helmetModelLoadingPromise;
+}
+
+/**
+ * Returns current status of the Dedicated Helmet ML Model
+ */
+export function getHelmetModelStatus() {
+  return {
+    status: helmetModelStatus,
+    errorMessage: helmetModelErrorMessage,
+    isReady: helmetModelStatus === "READY",
+    modelUrl: HELMET_MODEL_URL
+  };
+}
+
+// ============================================================================
+// PART 3: Dedicated Helmet ML Model Inference on Head Crop (`detectHelmetForPerson`)
+// ============================================================================
+
+/**
+ * PART 3: Runs Dedicated ML Inference on Person's Head/Upper-Body Crop.
+ * 
+ * STRICT CONSERVATIVE SAFETY RULE:
+ * If the dedicated helmet model is uninitialized, loading fails, tensor processing errors,
+ * or prediction score < HELMET_CONFIDENCE_THRESHOLD (0.65), it strictly returns
+ * 'hasHelmet: false' with a clear diagnostic reason.
+ * 
+ * NEVER assumes hasHelmet = true!
+ */
+export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config = {}) {
+  const threshold = config.helmetThreshold || HELMET_CONFIDENCE_THRESHOLD;
+
+  if (!videoOrCanvas || !personNormBox || personNormBox.length < 4) {
+    return {
+      hasHelmet: false,
+      confidence: 0.0,
+      reason: "Helmet verification unavailable (Invalid video/canvas or bounding box)",
+      modelStatus: helmetModelStatus,
+      diagnostics: { rawScore: 0 }
+    };
+  }
+
+  // Ensure helmet model is loaded
+  if (helmetModelStatus !== "READY") {
+    const loadRes = await loadHelmetDetectionModel();
+    if (!loadRes.success || !helmetModel) {
+      return {
+        hasHelmet: false,
+        confidence: 0.0,
+        reason: "Helmet verification unavailable (Trained ML helmet model files not supplied at /models/helmet/model.json)",
+        modelStatus: helmetModelStatus,
+        diagnostics: { rawScore: 0 }
+      };
+    }
+  }
+
+  const tensorToDispose = [];
+
+  try {
+    const width = videoOrCanvas.width || videoOrCanvas.videoWidth || 640;
+    const height = videoOrCanvas.height || videoOrCanvas.videoHeight || 360;
+
+    if (width === 0 || height === 0) {
+      return {
+        hasHelmet: false,
+        confidence: 0.0,
+        reason: "Helmet verification unavailable (Zero video dimensions)",
+        modelStatus: helmetModelStatus,
+        diagnostics: { rawScore: 0 }
+      };
+    }
+
+    // Crop top 25% (Head & Shoulder ROI) of person bounding box
+    const bx = Math.max(0, Math.min(width - 1, Math.floor(personNormBox[0] * width)));
+    const by = Math.max(0, Math.min(height - 1, Math.floor(personNormBox[1] * height)));
+    const bw = Math.max(10, Math.min(width - bx, Math.floor(personNormBox[2] * width)));
+    const bh = Math.max(10, Math.min(height - by, Math.floor(personNormBox[3] * height * 0.25)));
+
+    if (bw < 10 || bh < 10) {
+      return {
+        hasHelmet: false,
+        confidence: 0.0,
+        reason: "Helmet verification unavailable (Head crop too small)",
+        modelStatus: helmetModelStatus,
+        diagnostics: { rawScore: 0 }
+      };
+    }
+
+    // Extract head crop onto an offscreen canvas
+    const cropCanvas = document.createElement("canvas");
+    cropCanvas.width = bw;
+    cropCanvas.height = bh;
+    const cropCtx = cropCanvas.getContext("2d");
+    cropCtx.drawImage(videoOrCanvas, bx, by, bw, bh, 0, 0, bw, bh);
+
+    // Convert crop canvas to TensorFlow Tensor (224x224 input tensor)
+    const imgTensor = tf.browser.fromPixels(cropCanvas);
+    tensorToDispose.push(imgTensor);
+
+    const resizedTensor = tf.image.resizeBilinear(imgTensor, [224, 224]);
+    tensorToDispose.push(resizedTensor);
+
+    const normalizedTensor = tf.div(resizedTensor, 255.0).expandDims(0);
+    tensorToDispose.push(normalizedTensor);
+
+    // Run ML Model Inference
+    const predictionTensor = helmetModel.predict(normalizedTensor);
+    tensorToDispose.push(predictionTensor);
+
+    const scores = await predictionTensor.data();
+    
+    // Interpret output score (class 0: helmet, class 1: no_helmet or single sigmoid output)
+    let rawScore = 0.0;
+    if (scores.length >= 2) {
+      rawScore = scores[0]; // Helmet class probability
+    } else if (scores.length === 1) {
+      rawScore = scores[0]; // Sigmoid helmet output
+    }
+
+    const hasHelmet = rawScore >= threshold;
+    const confidence = Math.round(rawScore * 100) / 100;
+
+    return {
+      hasHelmet,
+      confidence,
+      reason: hasHelmet
+        ? `HARDHAT VERIFIED: Dedicated ML Model output (${Math.round(confidence * 100)}% >= ${Math.round(threshold * 100)}%)`
+        : `MISSING HELMET: Dedicated ML Model output (${Math.round(confidence * 100)}% below ${Math.round(threshold * 100)}% threshold)`,
+      modelStatus: helmetModelStatus,
+      diagnostics: { rawScore }
+    };
+
+  } catch (err) {
+    console.error("Helmet ML Inference Error:", err);
+    return {
+      hasHelmet: false,
+      confidence: 0.0,
+      reason: `Helmet verification unavailable (${err.message})`,
+      modelStatus: helmetModelStatus,
+      diagnostics: { rawScore: 0 }
+    };
+  } finally {
+    // Explicitly dispose intermediate tensors to prevent memory leaks
+    tensorToDispose.forEach((t) => {
+      try {
+        if (t && t.dispose) t.dispose();
+      } catch (e) {}
+    });
+  }
+}
+
+// ============================================================================
+// PART 6: Legacy `inspectHelmetAndPersonsInCanvas()` Compatibility Wrapper
+// ============================================================================
+
+/**
+ * PART 6: Legacy Compatibility Function.
+ * Deprecated HSV color heuristic is removed as primary decision maker.
+ * Delegates directly to ML-based `detectHelmetForPerson()`.
+ */
+export function inspectHelmetAndPersonsInCanvas(canvas, box) {
+  // Conservative baseline: Never assume hasHelmet = true by default
+  return {
+    hasHelmet: false,
+    confidence: 0.0,
+    reason: "Helmet verification requires ML model. (Default hasHelmet = false)",
+    diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
+  };
+}
+
+// ============================================================================
+// General Utilities (Frame Quality, Canvas Snapshot, Audio Siren)
+// ============================================================================
+
 export function analyzeFrameQuality(canvas, ctx) {
   if (!canvas || !ctx) {
     return { isAssessable: false, brightness: 0, blurScore: 0, reason: "Canvas context uninitialized" };
@@ -187,9 +416,6 @@ export function analyzeFrameQuality(canvas, ctx) {
   }
 }
 
-/**
- * Checks if point (x, y) in 0-1 normalized coordinates is inside a polygon ROI
- */
 export function isPointInPolygon(point, polygon) {
   if (!polygon || polygon.length < 3) return false;
   const [x, y] = point;
@@ -206,9 +432,6 @@ export function isPointInPolygon(point, polygon) {
   return inside;
 }
 
-/**
- * Calculates Euclidean distance between two center points [x, y, w, h] (normalized 0-1)
- */
 export function calculateBoxDistance(box1, box2) {
   const cx1 = box1[0] + box1[2] / 2;
   const cy1 = box1[1] + box1[3] / 2;
@@ -220,9 +443,6 @@ export function calculateBoxDistance(box1, box2) {
   return Math.round(dist * 100) / 100;
 }
 
-/**
- * Extracts average color feature vector from target bounding box on canvas
- */
 export function extractBoxFeatureVector(canvas, box) {
   if (!canvas) return { r_avg: 128, g_avg: 128, b_avg: 128 };
   try {
@@ -254,9 +474,6 @@ export function extractBoxFeatureVector(canvas, box) {
   }
 }
 
-/**
- * Captures live Base64 JPEG frame snapshot from canvas with burnt-in metadata text stamp
- */
 export function captureCanvasSnapshot(canvas, overlayText = "") {
   if (!canvas) return "";
   try {
@@ -280,191 +497,8 @@ export function captureCanvasSnapshot(canvas, overlayText = "") {
   }
 }
 
-/**
- * // FIX & IMPROVED: Strict & Conservative Computer Vision Hardhat Inspection Algorithm.
- * 
- * PRODUCTION LIMITATION NOTICE:
- * Standard COCO-SSD object detection models (MobileNet) do NOT contain a custom 'hardhat' / 'safety helmet' class.
- * Reliable production-grade PPE helmet verification requires a fine-tuned ML model (e.g. YOLOv8 / Faster R-CNN)
- * trained specifically on industrial hardhat datasets.
- * 
- * This classical computer-vision heuristic is designed to be STRICT & CONSERVATIVE:
- * - It strictly prefers 'hasHelmet: false' when visual evidence is uncertain.
- * - It analyzes a smaller, head-dome focused ROI (top 16% of person box) to prevent hair/clothes interference.
- * - It enforces multi-attribute checks: Plastic HSV Saturation, Top-Region Concentration, and Spatial Clustered Pixel Density.
- */
-export function inspectHelmetAndPersonsInCanvas(canvas, box) {
-  // // FIX: Conservative Rule - Never assume helmet = true when canvas or box is uninitialized
-  if (!canvas || !box || box.length < 4) {
-    return {
-      hasHelmet: false,
-      confidence: 0.50,
-      reason: "MISSING HELMET: Canvas or bounding box uninitialized",
-      diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
-    };
-  }
-
-  try {
-    const ctx = canvas.getContext("2d");
-    const width = canvas.width || 640;
-    const height = canvas.height || 360;
-
-    if (width === 0 || height === 0) {
-      return {
-        hasHelmet: false,
-        confidence: 0.50,
-        reason: "MISSING HELMET: Zero canvas dimensions",
-        diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
-      };
-    }
-
-    // // FIX: Clamp bounding-box coordinates to prevent getImageData invalid arguments
-    const bx = Math.max(0, Math.min(width - 1, Math.floor(box[0] * width)));
-    const by = Math.max(0, Math.min(height - 1, Math.floor(box[1] * height)));
-    const bw = Math.max(10, Math.min(width - bx, Math.floor(box[2] * width)));
-    const personH = Math.floor(box[3] * height);
-
-    // // IMPROVED: Analyze smaller, head-dome focused ROI (top 16% of person box instead of top 25%)
-    const hh = Math.max(8, Math.min(height - by, Math.floor(personH * 0.16)));
-
-    if (bw < 8 || hh < 8) {
-      return {
-        hasHelmet: false,
-        confidence: 0.55,
-        reason: "MISSING HELMET: Head ROI too small for visual verification",
-        diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
-      };
-    }
-
-    const imgData = ctx.getImageData(bx, by, bw, hh);
-    const data = imgData.data;
-    const totalPixels = bw * hh;
-
-    if (totalPixels === 0) {
-      return {
-        hasHelmet: false,
-        confidence: 0.50,
-        reason: "MISSING HELMET: Zero pixel head ROI",
-        diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
-      };
-    }
-
-    // // NEW: Configurable Conservative Heuristic Thresholds
-    const helmetColorRatioThreshold = 0.30;     // At least 30% of head dome must be hardhat plastic color
-    const helmetUpperRegionThreshold = 0.45;    // At least 45% of hardhat pixels must be in top half of head ROI
-    const spatialClusterThreshold = 0.25;        // At least 25% contiguous cluster density
-
-    let hardhatPixelCount = 0;
-    let upperHalfHardhatPixels = 0;
-    const midY = Math.floor(hh / 2);
-
-    // Grid map for 2x2 contiguous spatial clustering test
-    const grid = new Uint8Array(bw * hh);
-
-    let idx = 0;
-    for (let y = 0; y < hh; y++) {
-      for (let x = 0; x < bw; x++) {
-        const pIdx = (y * bw + x) * 4;
-        const r = data[pIdx];
-        const g = data[pIdx + 1];
-        const b = data[pIdx + 2];
-
-        // RGB to HSV
-        const max = Math.max(r, g, b);
-        const min = Math.min(r, g, b);
-        const d = max - min;
-
-        let h = 0;
-        if (d !== 0) {
-          if (max === r) h = ((g - b) / d) % 6;
-          else if (max === g) h = (b - r) / d + 2;
-          else h = (r - g) / d + 4;
-          h = Math.round(h * 60);
-          if (h < 0) h += 360;
-        }
-
-        const s = max === 0 ? 0 : d / max;
-        const v = max / 255;
-
-        // Hardhat Plastic Reflection Thresholds (Yellow/Orange, Red, White/Blue)
-        const isYellowOrange = h >= 15 && h <= 55 && s > 0.40 && v > 0.45;
-        const isRedHelmet = (h <= 12 || h >= 348) && s > 0.50 && v > 0.40;
-        const isWhiteBlueHelmet = (h >= 180 && h <= 240 && s > 0.35) || (s < 0.12 && v > 0.82);
-
-        if (isYellowOrange || isRedHelmet || isWhiteBlueHelmet) {
-          hardhatPixelCount++;
-          grid[idx] = 1;
-          if (y < midY) {
-            upperHalfHardhatPixels++;
-          }
-        }
-        idx++;
-      }
-    }
-
-    // 1. Overall Hardhat Color Ratio
-    const colorRatio = Math.round((hardhatPixelCount / totalPixels) * 100) / 100;
-
-    // 2. Upper Region Concentration (Hardhat plastic is concentrated on the top dome)
-    const upperRegionRatio = hardhatPixelCount > 0
-      ? Math.round((upperHalfHardhatPixels / hardhatPixelCount) * 100) / 100
-      : 0;
-
-    // 3. Spatial Clustered Density Test (Filtering out isolated random noise pixels)
-    let clusteredPixels = 0;
-    for (let y = 0; y < hh - 1; y++) {
-      for (let x = 0; x < bw - 1; x++) {
-        const i = y * bw + x;
-        if (grid[i] === 1 && (grid[i + 1] === 1 || grid[i + bw] === 1)) {
-          clusteredPixels++;
-        }
-      }
-    }
-    const spatialScore = Math.round((clusteredPixels / totalPixels) * 100) / 100;
-
-    // // IMPROVED: CONSERVATIVE DECISION LOGIC - Requires ALL 3 criteria to be satisfied
-    const passesColor = colorRatio >= helmetColorRatioThreshold;
-    const passesUpperRegion = upperRegionRatio >= helmetUpperRegionThreshold;
-    const passesSpatialCluster = spatialScore >= spatialClusterThreshold;
-
-    const hasHelmet = passesColor && passesUpperRegion && passesSpatialCluster;
-
-    // // FIX: Realistic confidence calculation reflecting heuristic evidence (not fake 0.98)
-    const confidence = hasHelmet
-      ? Math.min(0.88, Math.round((0.65 + colorRatio * 0.25) * 100) / 100)
-      : Math.min(0.85, Math.round((0.60 + (1 - colorRatio) * 0.25) * 100) / 100);
-
-    const reason = hasHelmet
-      ? "HARDHAT DETECTED: Strong helmet-like visual evidence"
-      : "MISSING HELMET: No sufficient helmet evidence";
-
-    return {
-      hasHelmet,
-      confidence,
-      reason,
-      diagnostics: {
-        colorRatio,
-        upperRegionRatio,
-        spatialScore
-      }
-    };
-
-  } catch (err) {
-    // // FIX: CONSERVATIVE RULE - On error, NEVER assume helmet = true
-    return {
-      hasHelmet: false,
-      confidence: 0.50,
-      reason: `Helmet detection unavailable (${err.message})`,
-      diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
-    };
-  }
-}
-
-/**
- * Siren Escalation Audio Player (Web Audio API Synthesizer)
- */
 export function startSirenAlarm() {
-  if (sirenOscillator) return; // Already sounding
+  if (sirenOscillator) return;
 
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -524,17 +558,20 @@ export function stopSirenAlarm() {
   }
 }
 
+// ============================================================================
+// PART 5: Main Real-Time Frame Inference & Tracking Engine (`detectObjectsAndMobilePhone`)
+// ============================================================================
+
 /**
- * Main Real-Time Frame Inference & Tracking Engine
- * // IMPROVED: Multi-Stage Phone Detection, Spatial Upper-Body Association, Frame Persistence, and Grace Period.
+ * PART 5: Main Real-Time Frame Inference & Tracking Engine
+ * Runs TensorFlow COCO-SSD Object Detection + Dedicated ML Helmet Inspection.
  */
 export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
-  // Configurable thresholds & parameters with sensible defaults
   const minConfidence = config.minConfidence || 0.35;
-  const phoneThreshold = config.phoneThreshold || 0.15; // Low score threshold specifically for small cell phone bounding boxes
-  const phonePersistenceFrames = config.phonePersistenceFrames || 3; // // NEW: Minimum consecutive frames required
-  const phoneMissGraceFrames = config.phoneMissGraceFrames || 5;       // // NEW: Grace period frames before resetting state
-  const phoneAssociationDistance = config.phoneAssociationDistance || 0.65; // // NEW: Upper body distance factor
+  const phoneThreshold = config.phoneThreshold || 0.15;
+  const phonePersistenceFrames = config.phonePersistenceFrames || 3;
+  const phoneMissGraceFrames = config.phoneMissGraceFrames || 5;
+  const phoneAssociationDistance = config.phoneAssociationDistance || 0.65;
   const minDurationSec = config.minDurationSec || 2.0;
   const maxWarnings = config.maxWarnings || 3;
   const warningIntervalSec = config.warningIntervalSec || 2.5;
@@ -553,7 +590,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
     };
   }
 
-  // Ensure model is loaded
+  // Ensure COCO-SSD model is loaded
   if (modelStatus !== "READY") {
     const loadRes = await loadDetectionModel();
     if (!loadRes.success) {
@@ -590,10 +627,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       };
     }
 
-    // // IMPROVED: Run TensorFlow COCO-SSD Inference with LOW score threshold (0.15) to capture small objects (cell phones)
+    // Run TensorFlow COCO-SSD Inference with LOW score threshold (0.15) to capture small objects
     const rawPredictions = await cocoModel.detect(videoOrCanvas, 25, 0.15);
 
-    // // NEW: Console Debug Logging for Verification
     console.log(
       "ALL AI DETECTIONS:",
       rawPredictions.map((p) => ({
@@ -613,7 +649,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       (p) => p.class === "person" && p.score >= minConfidence
     );
 
-    // 2. // IMPROVED: Multi-Stage Extraction & Validation of Cell Phone Candidates
+    // 2. Extract Cell Phone Detections
     const rawPhoneDetections = rawPredictions.filter(
       (p) => p.class === "cell phone" || p.class === "mobile phone" || p.class === "phone"
     );
@@ -651,7 +687,8 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
     const now = Date.now();
     const updatedPersons = [];
 
-    personDetections.forEach((det) => {
+    // Track matching loop
+    for (let det of personDetections) {
       const normBox = [
         Math.max(0, det.bbox[0] / width),
         Math.max(0, det.bbox[1] / height),
@@ -684,29 +721,67 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         activeTracks.push(newTrack);
       }
 
-      const helmetCheck = inspectHelmetAndPersonsInCanvas(videoOrCanvas, normBox);
+      // =========================================================================
+      // PART 4: Per-Person Dedicated ML Helmet Verification & Temporal Persistence
+      // =========================================================================
+      if (!helmetVerificationState.has(trackId)) {
+        helmetVerificationState.set(trackId, {
+          hasHelmet: false,
+          confidence: 0,
+          persistenceCount: 0,
+          missGraceCount: HELMET_MISS_GRACE_FRAMES,
+          lastSeen: now,
+          reason: "Initializing ML helmet verification"
+        });
+      }
+
+      const hState = helmetVerificationState.get(trackId);
+
+      // Run dedicated ML helmet inspection on person head crop
+      const mlHelmetRes = await detectHelmetForPerson(videoOrCanvas, normBox, config);
+
+      if (mlHelmetRes.hasHelmet) {
+        hState.persistenceCount += 1;
+        hState.missGraceCount = HELMET_MISS_GRACE_FRAMES;
+        hState.lastSeen = now;
+        hState.confidence = mlHelmetRes.confidence;
+        hState.reason = mlHelmetRes.reason;
+      } else {
+        if (hState.persistenceCount >= HELMET_PERSISTENCE_FRAMES && hState.missGraceCount > 0) {
+          hState.missGraceCount -= 1;
+          hState.lastSeen = now;
+        } else {
+          hState.persistenceCount = 0;
+          hState.confidence = mlHelmetRes.confidence;
+          hState.reason = mlHelmetRes.reason;
+        }
+      }
+
+      const verifiedHelmet = hState.persistenceCount >= HELMET_PERSISTENCE_FRAMES && hState.missGraceCount > 0;
 
       updatedPersons.push({
         trackId: trackId,
         id: trackId,
         box: normBox,
         confidence: Math.round(det.score * 100) / 100,
-        hasHelmet: helmetCheck.hasHelmet,
-        label: `${trackId} | Person (${Math.round(det.score * 100)}%)`,
-        color: helmetCheck.hasHelmet ? "#10b981" : "#ef4444",
+        hasHelmet: verifiedHelmet,
+        helmetConfidence: hState.confidence,
+        helmetReason: hState.reason,
+        label: verifiedHelmet
+          ? `${trackId} | Helmet OK (${Math.round(hState.confidence * 100)}%)`
+          : `${trackId} | NO HELMET`,
+        color: verifiedHelmet ? "#10b981" : "#ef4444",
         isUsingPhone: false,
         associatedPhone: null
       });
-    });
+    }
 
     activeTracks = activeTracks.filter((tr) => now - tr.lastSeen < 3000);
 
-    // 4. // IMPROVED & FIX: Robust Person-Phone Spatial Association (No Duplicate Multi-Person Assignment)
+    // 4. Person-Phone Spatial Association (Nearest-Person Distance Sorting)
     const validPhoneCandidates = [];
     const normalizedPhones = [];
-
-    // Map candidate pairings to assign each phone ONLY to its nearest spatially compatible person
-    const candidatePairings = []; // [{ phoneIndex, personIndex, distance, phoneNormBox, phoneScore, class }]
+    const candidatePairings = [];
 
     rawPhoneDetections.forEach((phoneDet, pIdx) => {
       const score = phoneDet.score;
@@ -729,12 +804,10 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         return;
       }
 
-      // Check spatial relationship against all detected persons
       let foundAssociation = false;
       updatedPersons.forEach((person, personIdx) => {
         const pBox = person.box;
 
-        // Expanded upper-body ROI (Head, Ear, Chest, Hands)
         const expX1 = pBox[0] - pBox[2] * 0.40;
         const expY1 = pBox[1] - pBox[3] * 0.25;
         const expX2 = pBox[0] + pBox[2] * 1.40;
@@ -746,7 +819,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
           pCenter[1] >= expY1 &&
           pCenter[1] <= expY2;
 
-        // Distance to upper-body center [x + w/2, y + h*0.35]
         const upperBodyCenter = [pBox[0] + pBox[2] / 2, pBox[1] + pBox[3] * 0.35];
         const distToUpperBody = Math.sqrt(
           Math.pow(pCenter[0] - upperBodyCenter[0], 2) +
@@ -778,7 +850,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       }
     });
 
-    // Sort pairings by distance to assign phone to the nearest/most spatially compatible person
     candidatePairings.sort((a, b) => a.distance - b.distance);
 
     const assignedPhoneIndices = new Set();
@@ -790,7 +861,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         assignedPersonIndices.add(pair.personIdx);
 
         const targetPerson = updatedPersons[pair.personIdx];
-        targetPerson.hasPhoneCandidateThisFrame = true; // Temporary flag for frame-level persistence
+        targetPerson.hasPhoneCandidateThisFrame = true;
         targetPerson.associatedPhone = {
           box: pair.pNormBox,
           confidence: Math.round(pair.phoneScore * 100) / 100
@@ -813,7 +884,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       }
     });
 
-    // 5. // NEW & IMPROVED: Frame-Level Persistence, Miss Grace Period, and Siren Escalation State Machine
+    // 5. Phone Misuse Verification & Warning Escalation State Machine
     let currentActivePhoneEvent = null;
     let globalSirenNeeded = false;
 
@@ -837,29 +908,23 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       const state = phoneMisuseState.get(tId);
 
       if (person.hasPhoneCandidateThisFrame) {
-        // // NEW: Increment persistence counter on real detection frame
         state.persistenceCount += 1;
-        state.missGraceCount = phoneMissGraceFrames; // Reset grace frames
+        state.missGraceCount = phoneMissGraceFrames;
         state.lastSeen = now;
         state.lastPhoneConfidence = person.associatedPhone ? person.associatedPhone.confidence : state.lastPhoneConfidence;
       } else {
-        // // NEW: Handle temporary missed detection grace period
         if (state.persistenceCount >= phonePersistenceFrames && state.missGraceCount > 0) {
-          state.missGraceCount -= 1; // Decrement grace counter
-          state.lastSeen = now;     // Maintain last seen timestamp during grace period
+          state.missGraceCount -= 1;
+          state.lastSeen = now;
         } else {
-          // Grace expired or persistence threshold never reached -> reset track state
           state.persistenceCount = 0;
         }
       }
 
-      // // NEW: Set person.isUsingPhone ONLY when persistence threshold is met or within grace period
       if (state.persistenceCount >= phonePersistenceFrames && state.missGraceCount > 0) {
         person.isUsingPhone = true;
-
         state.durationSec = Math.round(((now - state.firstSeen) / 1000) * 10) / 10;
 
-        // // FIX: Warning & Siren Escalation Logic
         if (state.durationSec >= minDurationSec) {
           if (state.warningLevel === 0) {
             state.warningLevel = 1;
@@ -871,7 +936,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
             state.warningLevel = 3;
             state.lastWarningTime = now;
           } else if (state.warningLevel >= maxWarnings) {
-            // // FIX: Ensure sirenActive becomes true reliably when maxWarnings reached!
             state.sirenActive = true;
           }
         }
@@ -902,7 +966,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
 
       } else {
         person.isUsingPhone = false;
-        // If grace period has fully expired and no phone detection, clean up state
         if (state.missGraceCount <= 0 || state.persistenceCount < phonePersistenceFrames) {
           if (now - state.lastSeen > 2000) {
             phoneMisuseState.delete(tId);
@@ -911,7 +974,6 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       }
     });
 
-    // Handle siren audio toggle
     if (globalSirenNeeded) {
       startSirenAlarm();
     } else {
