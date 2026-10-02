@@ -62,32 +62,108 @@ export default function NearMissView() {
             {/* Radar Grid Circles */}
             <div className="absolute w-[80%] aspect-square rounded-full border border-cyan-500/20" />
             <div className="absolute w-[50%] aspect-square rounded-full border border-cyan-500/30" />
-            <div className="absolute w-[20%] aspect-square rounded-full border border-red-500/40" />
+            <div className="absolute w-[25%] aspect-square rounded-full border border-red-500/40" />
 
-            {/* Radar Line */}
+            {/* Radar Sweep Animation */}
             <div className="absolute w-full h-full animate-radar opacity-40">
               <div className="w-1/2 h-1/2 bg-gradient-to-tr from-cyan-500/30 to-transparent origin-bottom-right" />
             </div>
 
-            {/* Vehicle Icon Node */}
-            <div className="absolute top-[40%] left-[60%] -translate-x-1/2 -translate-y-1/2 p-2 rounded-xl bg-blue-500/20 border border-blue-400 text-blue-400 text-[10px] font-bold shadow-lg">
-              {vehicleId}
-            </div>
+            {/* Dynamic Worker Position relative to Vehicle Center (50%, 50%) */}
+            {(() => {
+              const vehicleX = 50;
+              const vehicleY = 50;
+              // Map 0.2m -> 3.0m to radar distance offset (6% -> 38% radius)
+              const distanceOffset = 5 + (measuredDist / 3.0) * 33;
+              // Angle offset (-135 degrees = top-left direction)
+              const angleRad = (-135 * Math.PI) / 180;
+              const workerX = vehicleX + distanceOffset * Math.cos(angleRad);
+              const workerY = vehicleY + distanceOffset * Math.sin(angleRad);
+              const isDanger = measuredDist < 1.0;
+              const isWarning = measuredDist >= 1.0 && measuredDist <= 2.0;
 
-            {/* Worker Icon Node */}
-            <div className="absolute top-[48%] left-[48%] -translate-x-1/2 -translate-y-1/2 p-2 rounded-xl bg-red-500/20 border border-red-400 text-red-400 text-[10px] font-bold animate-pulse shadow-lg">
-              {workerId}
-            </div>
+              return (
+                <>
+                  {/* Vehicle Safety Boundary Box (Proximity Danger Perimeter around Vehicle) */}
+                  <div
+                    className={`absolute rounded-2xl border-2 transition-all duration-300 pointer-events-none flex items-start justify-end p-1.5 ${
+                      isDanger
+                        ? "bg-red-500/20 border-red-500 shadow-[0_0_20px_#ef4444]"
+                        : isWarning
+                        ? "bg-amber-500/15 border-amber-400 shadow-[0_0_15px_#f59e0b]"
+                        : "bg-cyan-500/10 border-cyan-500/40"
+                    }`}
+                    style={{
+                      left: "50%",
+                      top: "50%",
+                      width: "36%",
+                      height: "44%",
+                      transform: "translate(-50%, -50%)"
+                    }}
+                  >
+                    <span className="text-[9px] font-mono font-bold text-red-400/90 bg-slate-950/80 px-1 rounded border border-red-500/40">
+                      SAFETY BOUNDARY (2.0m)
+                    </span>
+                  </div>
 
-            {/* Proximity Line */}
-            <svg className="absolute inset-0 w-full h-full pointer-events-none">
-              <line x1="60%" y1="40%" x2="48%" y2="48%" stroke="#ef4444" strokeWidth="2" strokeDasharray="4 4" />
-            </svg>
+                  {/* Vehicle Icon Node */}
+                  <div
+                    className="absolute p-2.5 rounded-xl bg-blue-600/30 border-2 border-blue-400 text-blue-300 text-[10px] font-bold shadow-lg flex items-center gap-1.5 z-10"
+                    style={{ left: `${vehicleX}%`, top: `${vehicleY}%`, transform: "translate(-50%, -50%)" }}
+                  >
+                    <div className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+                    <span>{vehicleId}</span>
+                  </div>
 
-            {/* Distance Box */}
-            <div className="absolute bottom-4 left-4 p-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs text-slate-200">
-              <span>Measured Distance: <strong className="text-red-400 font-bold">{measuredDist} meters</strong> (Safe Distance: &gt; 2.0m)</span>
-            </div>
+                  {/* Worker Icon Node (Positioned dynamically based on measuredDist slider) */}
+                  <div
+                    className={`absolute p-2.5 rounded-xl border-2 text-[10px] font-bold shadow-lg transition-all duration-150 flex items-center gap-1.5 z-10 ${
+                      isDanger
+                        ? "bg-red-600/40 border-red-400 text-red-200 animate-bounce shadow-red-500/30"
+                        : isWarning
+                        ? "bg-amber-600/30 border-amber-400 text-amber-200"
+                        : "bg-emerald-600/30 border-emerald-400 text-emerald-200"
+                    }`}
+                    style={{ left: `${workerX}%`, top: `${workerY}%`, transform: "translate(-50%, -50%)" }}
+                  >
+                    <div className={`w-2 h-2 rounded-full ${isDanger ? "bg-red-400 animate-ping" : "bg-emerald-400"}`} />
+                    <span>{workerId}</span>
+                  </div>
+
+                  {/* Dynamic Proximity Line connecting Vehicle & Worker */}
+                  <svg className="absolute inset-0 w-full h-full pointer-events-none z-0">
+                    <line
+                      x1={`${vehicleX}%`}
+                      y1={`${vehicleY}%`}
+                      x2={`${workerX}%`}
+                      y2={`${workerY}%`}
+                      stroke={isDanger ? "#ef4444" : isWarning ? "#f59e0b" : "#10b981"}
+                      strokeWidth="2.5"
+                      strokeDasharray="4 4"
+                    />
+                  </svg>
+
+                  {/* Live Distance Meter & Warning Overlay */}
+                  <div className="absolute bottom-4 left-4 p-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs text-slate-200 shadow-xl flex items-center gap-3">
+                    <div>
+                      <span>Measured Distance: </span>
+                      <strong className={`font-bold ${isDanger ? "text-red-400" : isWarning ? "text-amber-400" : "text-emerald-400"}`}>
+                        {measuredDist} meters
+                      </strong>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                      isDanger
+                        ? "bg-red-500/20 text-red-300 border-red-500/40"
+                        : isWarning
+                        ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                        : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                    }`}>
+                      {isDanger ? "CRITICAL PROXIMITY BREACH" : isWarning ? "HIGH PROXIMITY RISK" : "SAFE DISTANCE OK"}
+                    </span>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
 
