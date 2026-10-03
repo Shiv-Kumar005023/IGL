@@ -29,6 +29,7 @@ export default function Sidebar() {
     { id: "expected-personnel", label: "Expected Personnel", icon: UserCheck, badge: unknownAlerts > 0 ? unknownAlerts : "ALERT" },
     { id: "packaging", label: "Packaging Inspection", icon: Boxes },
     { id: "personnel-monitoring", label: "Personnel Schedule & Monitoring", icon: Users, badge: activePersonnelAlerts > 0 ? activePersonnelAlerts : "NEW" },
+    { id: "image-camera-inspection", label: "Image & Camera Scanner", icon: Camera, badge: "DUAL MODE" },
     { id: "alerts", label: "Safety Events", icon: ShieldAlert, badge: stats.active_alerts > 0 ? stats.active_alerts : null },
     { id: "near-miss", label: "Near Miss", icon: AlertTriangle },
     { id: "personnel", label: "Incidents", icon: Flame },

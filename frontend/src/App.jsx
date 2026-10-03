@@ -13,6 +13,7 @@ import PackagingInspectionView from "./views/PackagingInspectionView";
 import AlertsView from "./views/AlertsView";
 import PersonnelAnomalyView from "./views/PersonnelAnomalyView";
 import PersonnelMonitoringView from "./views/PersonnelMonitoringView";
+import ImageCameraInspectionView from "./views/ImageCameraInspectionView";
 import NearMissView from "./views/NearMissView";
 import CameraHealthView from "./views/CameraHealthView";
 import AnalyticsView from "./views/AnalyticsView";
@@ -28,6 +29,7 @@ function MainContent() {
       {activeTab === "live-monitoring" && <LiveMonitoringView />}
       {activeTab === "expected-personnel" && <ExpectedPersonnelView />}
       {activeTab === "personnel-monitoring" && <PersonnelMonitoringView />}
+      {activeTab === "image-camera-inspection" && <ImageCameraInspectionView />}
       {activeTab === "packaging" && <PackagingInspectionView />}
       {activeTab === "alerts" && <AlertsView />}
       {activeTab === "personnel" && <PersonnelAnomalyView />}
