@@ -146,13 +146,18 @@ export default function CameraInputView() {
     if (file) {
       setConnecting(true);
       setError(null);
-      const res = await connectVideoFile(file);
-      setConnecting(false);
+      if (file.type.startsWith("image/")) {
+        const res = await connectImageFile(file);
+        setConnecting(false);
+      } else {
+        const res = await connectVideoFile(file);
+        setConnecting(false);
 
-      if (videoRef.current && res.fileUrl) {
-        videoRef.current.srcObject = null;
-        videoRef.current.src = res.fileUrl;
-        videoRef.current.play();
+        if (videoRef.current && res.fileUrl) {
+          videoRef.current.srcObject = null;
+          videoRef.current.src = res.fileUrl;
+          videoRef.current.play();
+        }
       }
     }
   };
@@ -163,10 +168,10 @@ export default function CameraInputView() {
       <div>
         <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
           <Camera className="w-5 h-5 text-cyan-400" />
-          Camera Setup (Webcam / CCTV Input)
+          Camera Setup (Webcam / Image / Video Input)
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Choose how you want to connect your camera feed to the AI safety scanner.
+          Choose how you want to connect your camera feed or image file to the AI safety scanner.
         </p>
       </div>
 
@@ -239,22 +244,22 @@ export default function CameraInputView() {
           </form>
         </div>
 
-        {/* Option 3: Upload Video File */}
+        {/* Option 3: Upload Image / Video File */}
         <div className="p-5 rounded-2xl glass-panel glass-panel-hover flex flex-col justify-between space-y-4">
           <div className="space-y-2">
             <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
               <Upload className="w-5 h-5" />
             </div>
-            <h3 className="text-sm font-bold text-slate-200">Option 3: Upload Recorded Video</h3>
+            <h3 className="text-sm font-bold text-slate-200">Option 3: Upload Image / Video File</h3>
             <p className="text-xs text-slate-400">
-              Select an MP4 video file from your computer to run safety scanning.
+              Select a JPG, JPEG, PNG image or MP4 video file from your computer to run safety scanning.
             </p>
           </div>
 
           <label className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition cursor-pointer flex items-center justify-center gap-2 border border-slate-700">
             <Upload className="w-4 h-4 text-emerald-400" />
-            <span>Select MP4 Video File</span>
-            <input type="file" accept="video/mp4,video/webm" onChange={handleFileUpload} className="hidden" />
+            <span>Select Image or Video</span>
+            <input type="file" accept="image/jpeg,image/png,image/jpg,video/mp4,video/webm" onChange={handleFileUpload} className="hidden" />
           </label>
         </div>
       </div>

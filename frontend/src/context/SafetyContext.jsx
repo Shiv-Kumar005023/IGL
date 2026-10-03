@@ -215,6 +215,16 @@ export function SafetyProvider({ children }) {
     return { success: true, fileUrl };
   };
 
+  // Connect Image File Upload (JPG, JPEG, PNG)
+  const connectImageFile = async (file) => {
+    const fileUrl = URL.createObjectURL(file);
+    const camConfig = { type: "image", name: `Image: ${file.name}`, url: fileUrl };
+    setStreamSource(camConfig);
+    await registerCameraApi({ name: camConfig.name, source_type: "image", source_url: file.name });
+    await refreshBackendData();
+    return { success: true, fileUrl };
+  };
+
   // Disconnect Stream
   const disconnectStream = () => {
     if (activeStream && activeStream.getTracks) {
@@ -445,6 +455,7 @@ export function SafetyProvider({ children }) {
         connectWebcam,
         connectRtsp,
         connectVideoFile,
+        connectImageFile,
         disconnectStream,
         stats,
         alerts,

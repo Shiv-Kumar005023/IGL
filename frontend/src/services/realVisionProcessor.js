@@ -646,8 +646,8 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
   }
 
   try {
-    const width = videoOrCanvas.width || videoOrCanvas.videoWidth || 640;
-    const height = videoOrCanvas.height || videoOrCanvas.videoHeight || 360;
+    const width = videoOrCanvas.width || videoOrCanvas.videoWidth || videoOrCanvas.naturalWidth || 640;
+    const height = videoOrCanvas.height || videoOrCanvas.videoHeight || videoOrCanvas.naturalHeight || 360;
 
     if (width === 0 || height === 0) {
       return {

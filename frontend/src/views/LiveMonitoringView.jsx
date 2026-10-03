@@ -19,7 +19,10 @@ import {
   FlipHorizontal,
   UserPlus,
   UserCheck,
-  X
+  X,
+  Upload,
+  AlertCircle,
+  RefreshCw
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 import {
@@ -42,11 +45,22 @@ export default function LiveMonitoringView() {
     recordObservation,
     registeredPersonnel,
     registerPerson,
-    updatePersonRegistration
+    updatePersonRegistration,
+    connectWebcam,
+    connectImageFile,
+    connectVideoFile,
+    disconnectStream
   } = useSafety();
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const imageRef = useRef(null);
+
+  // Input Mode: "camera" (Live Camera) vs "image" (Upload Image)
+  const [inputMode, setInputMode] = useState("camera");
+  const [cameraError, setCameraError] = useState(null);
+  const [isConnectingCam, setIsConnectingCam] = useState(false);
+  const [uploadedImageSrc, setUploadedImageSrc] = useState(null);
 
   // Overlay Toggles
   const [showBoxes, setShowBoxes] = useState(true);
@@ -157,6 +171,43 @@ export default function LiveMonitoringView() {
     }, 1200);
   };
 
+  // Handle Mode Switch to Live Camera
+  const handleSelectLiveCamera = async () => {
+    setInputMode("camera");
+    setCameraError(null);
+    if (!activeStream) {
+      setIsConnectingCam(true);
+      const res = await connectWebcam();
+      setIsConnectingCam(false);
+      if (!res.success) {
+        setCameraError(res.error || "Camera access denied or device missing. Please click 'Enable Camera'.");
+      }
+    }
+  };
+
+  // Re-try / Re-request Camera Permission
+  const handleEnableCameraClick = async () => {
+    setCameraError(null);
+    setIsConnectingCam(true);
+    const res = await connectWebcam();
+    setIsConnectingCam(false);
+    if (!res.success) {
+      setCameraError(res.error || "Camera access denied. Please allow permissions in browser settings.");
+    }
+  };
+
+  // Handle Image File Upload (JPG, JPEG, PNG)
+  const handleImageUpload = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setInputMode("image");
+      setCameraError(null);
+      const fileUrl = URL.createObjectURL(file);
+      setUploadedImageSrc(fileUrl);
+      await connectImageFile(file);
+    }
+  };
+
   // Initialize TensorFlow COCO-SSD Model on Mount
   useEffect(() => {
     loadDetectionModel().then(() => {
@@ -179,31 +230,32 @@ export default function LiveMonitoringView() {
     const renderLoop = async () => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
+      const img = imageRef.current;
 
-      // Verify video frame availability
-      if (
-        video &&
-        canvas &&
-        (video.readyState >= 2 || video.videoWidth > 0)
-      ) {
-        if (canvas.width !== video.clientWidth || canvas.height !== video.clientHeight) {
-          canvas.width = video.clientWidth || 640;
-          canvas.height = video.clientHeight || 360;
+      const isImageSource = streamSource?.type === "image" && img && (img.complete || img.naturalWidth > 0);
+      const isVideoSource = video && (video.readyState >= 2 || video.videoWidth > 0);
+      const sourceElem = isImageSource ? img : isVideoSource ? video : null;
+
+      // Verify source & canvas availability
+      if (sourceElem && canvas) {
+        if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+          canvas.width = canvas.clientWidth || 640;
+          canvas.height = canvas.clientHeight || 360;
         }
 
         const ctx = canvas.getContext("2d");
         const width = canvas.width;
         const height = canvas.height;
 
-        // Draw current video frame onto canvas at 60 FPS (with optional horizontal mirror transform)
-        if (isMirrored) {
+        // Draw current frame onto canvas (with optional horizontal mirror transform for live webcam)
+        if (isMirrored && !isImageSource) {
           ctx.save();
           ctx.translate(width, 0);
           ctx.scale(-1, 1);
-          ctx.drawImage(video, 0, 0, width, height);
+          ctx.drawImage(sourceElem, 0, 0, width, height);
           ctx.restore();
         } else {
-          ctx.drawImage(video, 0, 0, width, height);
+          ctx.drawImage(sourceElem, 0, 0, width, height);
         }
 
         // 1. Draw Restricted Zones (Polygons)
@@ -211,13 +263,13 @@ export default function LiveMonitoringView() {
           restrictedZones.forEach((zone) => {
             if (zone.polygon_coords && zone.polygon_coords.length > 2) {
               ctx.beginPath();
-              const startX = isMirrored
+              const startX = isMirrored && !isImageSource
                 ? (1 - zone.polygon_coords[0][0]) * width
                 : zone.polygon_coords[0][0] * width;
               ctx.moveTo(startX, zone.polygon_coords[0][1] * height);
 
               for (let i = 1; i < zone.polygon_coords.length; i++) {
-                const zx = isMirrored
+                const zx = isMirrored && !isImageSource
                   ? (1 - zone.polygon_coords[i][0]) * width
                   : zone.polygon_coords[i][0] * width;
                 ctx.lineTo(zx, zone.polygon_coords[i][1] * height);
@@ -248,7 +300,7 @@ export default function LiveMonitoringView() {
           isDetectingRef.current = true;
           lastInferenceTimeRef.current = now;
 
-          detectObjectsAndMobilePhone(video, config)
+          detectObjectsAndMobilePhone(sourceElem, config)
             .then((result) => {
               detectionsRef.current = result;
 
@@ -437,60 +489,114 @@ export default function LiveMonitoringView() {
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto font-sans text-slate-800">
-      {/* Title Header */}
+      {/* Title Header & Mode Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <MonitorPlay className="w-5 h-5 text-cyan-400" />
-            Live Camera Screen & Real AI Person & Phone Detection
+            Live AI Inspection & Object Detection
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Real-time computer vision inference powered by TensorFlow.js COCO-SSD object detection.
+            Real-time computer vision inference powered by TensorFlow.js COCO-SSD detection.
           </p>
         </div>
 
-        {/* Overlay Toggle Buttons */}
-        <div className="flex flex-wrap items-center gap-2 bg-slate-900 p-1.5 rounded-xl border border-slate-800 text-xs">
+        {/* Dual Input Mode Controls: [ Live Camera ] [ Upload Image ] */}
+        <div className="flex flex-wrap items-center gap-2 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs">
           <button
-            onClick={() => setShowBoxes(!showBoxes)}
-            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
-              showBoxes ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30" : "text-slate-500"
+            onClick={handleSelectLiveCamera}
+            disabled={isConnectingCam}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+              inputMode === "camera"
+                ? "bg-cyan-600 text-white shadow-lg shadow-cyan-600/30"
+                : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            {showBoxes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            <span>Show Bounding Boxes</span>
+            {isConnectingCam ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+            <span>Live Camera</span>
           </button>
 
-          <button
-            onClick={() => setShowZones(!showZones)}
-            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
-              showZones ? "bg-red-500/20 text-red-400 border border-red-500/30" : "text-slate-500"
+          <label
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${
+              inputMode === "image"
+                ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/30"
+                : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            {showZones ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            <span>Show Restricted Zones</span>
-          </button>
+            <Upload className="w-4 h-4" />
+            <span>Upload Image</span>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/jpg"
+              onChange={handleImageUpload}
+              className="hidden"
+            />
+          </label>
+        </div>
+      </div>
 
+      {/* Permission Denied Alert & Enable Camera Button */}
+      {inputMode === "camera" && cameraError && (
+        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center justify-between gap-4 shadow-lg">
+          <div className="flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 shrink-0" />
+            <div>
+              <strong className="block font-bold">Camera Permission Required:</strong>
+              <span>{cameraError}</span>
+            </div>
+          </div>
           <button
-            onClick={() => setShowDistances(!showDistances)}
-            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
-              showDistances ? "bg-amber-500/20 text-amber-400 border border-amber-500/30" : "text-slate-500"
-            }`}
+            onClick={handleEnableCameraClick}
+            disabled={isConnectingCam}
+            className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition shadow-lg shrink-0 flex items-center gap-1.5"
           >
-            {showDistances ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-            <span>Show Distance Lines</span>
-          </button>
-
-          <button
-            onClick={() => setIsMirrored(!isMirrored)}
-            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
-              isMirrored ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30" : "text-slate-500"
-            }`}
-          >
-            <FlipHorizontal className="w-3.5 h-3.5" />
-            <span>Mirror View ({isMirrored ? "ON" : "OFF"})</span>
+            {isConnectingCam ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+            <span>Enable Camera</span>
           </button>
         </div>
+      )}
+
+      {/* Overlay Toggle Buttons */}
+      <div className="flex flex-wrap items-center gap-2 bg-slate-900/80 p-2 rounded-xl border border-slate-800 text-xs">
+        <button
+          onClick={() => setShowBoxes(!showBoxes)}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
+            showBoxes ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30" : "text-slate-500"
+          }`}
+        >
+          {showBoxes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+          <span>Show Bounding Boxes</span>
+        </button>
+
+        <button
+          onClick={() => setShowZones(!showZones)}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
+            showZones ? "bg-red-500/20 text-red-400 border border-red-500/30" : "text-slate-500"
+          }`}
+        >
+          {showZones ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+          <span>Show Restricted Zones</span>
+        </button>
+
+        <button
+          onClick={() => setShowDistances(!showDistances)}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
+            showDistances ? "bg-amber-500/20 text-amber-400 border border-amber-500/30" : "text-slate-500"
+          }`}
+        >
+          {showDistances ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+          <span>Show Distance Lines</span>
+        </button>
+
+        <button
+          onClick={() => setIsMirrored(!isMirrored)}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
+            isMirrored ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30" : "text-slate-500"
+          }`}
+        >
+          <FlipHorizontal className="w-3.5 h-3.5" />
+          <span>Mirror View ({isMirrored ? "ON" : "OFF"})</span>
+        </button>
       </div>
 
       {/* Real Automatic AI Person Counter Status Bar */}
@@ -777,8 +883,17 @@ export default function LiveMonitoringView() {
       {/* Main Video Stream Canvas Container */}
       <div className="p-4 rounded-2xl glass-panel space-y-4">
         <div className="relative rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex items-center justify-center">
-          {/* Hidden HTML5 Video Source */}
+          {/* Hidden HTML5 Video & Image Sources */}
           <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+          {uploadedImageSrc && (
+            <img
+              ref={imageRef}
+              src={uploadedImageSrc}
+              alt="Uploaded source"
+              className="hidden"
+              crossOrigin="anonymous"
+            />
+          )}
 
           {/* Main Inference Canvas */}
           <canvas ref={canvasRef} className="w-full h-full object-contain" />
