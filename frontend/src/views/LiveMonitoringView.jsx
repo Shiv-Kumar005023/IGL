@@ -16,7 +16,10 @@ import {
   CheckCircle2,
   Bug,
   Activity,
-  FlipHorizontal
+  FlipHorizontal,
+  UserPlus,
+  UserCheck,
+  X
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 import {
@@ -36,7 +39,10 @@ export default function LiveMonitoringView() {
     restrictedZones,
     dispatchAlert,
     setActiveTab,
-    recordObservation
+    recordObservation,
+    registeredPersonnel,
+    registerPerson,
+    updatePersonRegistration
   } = useSafety();
 
   const videoRef = useRef(null);
@@ -44,7 +50,7 @@ export default function LiveMonitoringView() {
 
   // Overlay Toggles
   const [showBoxes, setShowBoxes] = useState(true);
-  const [showZones, setShowZones] = useState(true);
+  const [showZones, setShowZones] = useState(false);
   const [showDistances, setShowDistances] = useState(true);
   const [isMirrored, setIsMirrored] = useState(true); // Horizontal mirror flip toggle
 
@@ -93,6 +99,63 @@ export default function LiveMonitoringView() {
     warningIntervalSec: 2.5,
     maxWarnings: 3
   });
+
+  // Reactive Live Persons List & Registration Modal State
+  const [livePersonsList, setLivePersonsList] = useState([]);
+  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
+  const [registrationForm, setRegistrationForm] = useState({
+    id: "",
+    track_id: "",
+    name: "",
+    designation: "Registered Worker",
+    department: "Refinery Operations"
+  });
+  const [regSuccessMsg, setRegSuccessMsg] = useState("");
+
+  const handleOpenRegisterModal = (targetTrackId = null) => {
+    const trackId = targetTrackId || (livePersonsList[0]?.trackId || `TRK-P${Math.floor(Math.random() * 800 + 100)}`);
+    const existing = (registeredPersonnel || []).find((r) => r.track_id === trackId || r.id === trackId);
+
+    if (existing) {
+      setRegistrationForm({
+        id: existing.id,
+        track_id: existing.track_id,
+        name: existing.name,
+        designation: existing.designation || "Registered Worker",
+        department: existing.department || "Refinery Operations"
+      });
+    } else {
+      const suggestedId = trackId.replace("TRK-P", "EMP-");
+      setRegistrationForm({
+        id: suggestedId,
+        track_id: trackId,
+        name: "",
+        designation: "Registered Worker",
+        department: "Refinery Operations"
+      });
+    }
+    setRegSuccessMsg("");
+    setIsRegisterModalOpen(true);
+  };
+
+  const handleSaveRegistration = async (e) => {
+    e.preventDefault();
+    if (!registrationForm.id || !registrationForm.name) return;
+
+    await registerPerson({
+      id: registrationForm.id,
+      track_id: registrationForm.track_id || registrationForm.id,
+      name: registrationForm.name,
+      designation: registrationForm.designation,
+      department: registrationForm.department
+    });
+
+    setRegSuccessMsg(`Successfully registered ${registrationForm.name} (${registrationForm.id}) to database!`);
+    setTimeout(() => {
+      setIsRegisterModalOpen(false);
+      setRegSuccessMsg("");
+    }, 1200);
+  };
 
   // Initialize TensorFlow COCO-SSD Model on Mount
   useEffect(() => {
@@ -196,6 +259,9 @@ export default function LiveMonitoringView() {
                 phoneCandidates: result.phoneCandidates || []
               });
 
+              // Synchronize live persons list for quick registration cards
+              setLivePersonsList(result.persons || []);
+
               // Synchronize person count (Strictly 0 when AI detects 0 persons)
               if (result.personCount !== personCount) {
                 setPersonCount(result.personCount);
@@ -263,23 +329,40 @@ export default function LiveMonitoringView() {
             const px = isMirrored ? width - (p[0] + p[2]) * width : p[0] * width;
             const py = p[1] * height, pw = p[2] * width, ph = p[3] * height;
 
-            const boxColor = pObj.isUsingPhone ? "#f59e0b" : pObj.color;
+            // Lookup registered identity by track_id or id
+            const regPerson = (registeredPersonnel || []).find(
+              (r) => r.track_id === pObj.trackId || r.id === pObj.trackId
+            );
+
+            const boxColor = pObj.isUsingPhone
+              ? "#f59e0b"
+              : regPerson
+              ? "#0284c7" // sky blue for registered personnel
+              : pObj.color;
+
             ctx.strokeStyle = boxColor;
             ctx.lineWidth = pObj.isUsingPhone ? 3.5 : 2.5;
             ctx.strokeRect(px, py, pw, ph);
 
-            const tagText = pObj.isUsingPhone
-              ? `${pObj.trackId} [PHONE DETECTED]`
+            const identityText = regPerson ? `${regPerson.id} | ${regPerson.name}` : pObj.trackId;
+            const statusText = pObj.isUsingPhone
+              ? "[PHONE DETECTED]"
               : pObj.hasHelmet
-              ? `${pObj.trackId} [Helmet OK]`
-              : `${pObj.trackId} [NO HELMET]`;
+              ? "[Helmet OK]"
+              : "[NO HELMET]";
+
+            const tagText = `${identityText} ${statusText}`;
 
             ctx.fillStyle = pObj.isUsingPhone
               ? "rgba(245, 158, 11, 0.95)"
+              : regPerson
+              ? "rgba(2, 132, 199, 0.95)"
               : pObj.hasHelmet
               ? "rgba(16, 185, 129, 0.9)"
               : "rgba(239, 68, 68, 0.95)";
-            ctx.fillRect(px, py - 24, Math.max(160, tagText.length * 8.5), 24);
+
+            const tagWidth = Math.max(170, tagText.length * 8.2);
+            ctx.fillRect(px, py - 24, tagWidth, 24);
 
             ctx.fillStyle = "#ffffff";
             ctx.font = "bold 11px sans-serif";
@@ -753,6 +836,121 @@ export default function LiveMonitoringView() {
         )}
       </div>
 
+      {/* Live Detected Persons & Quick Registration Panel */}
+      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 text-slate-100 space-y-4 shadow-xl">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
+              <UserCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-bold text-slate-100">
+                  Live Detected Persons & Quick Registration
+                </h2>
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30 font-mono">
+                  {livePersonsList.length} In Frame
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Assign live IDs, register names, and sync employee profiles with the SQLite database.
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => handleOpenRegisterModal()}
+            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition shadow-lg shadow-emerald-600/20 flex items-center gap-2 cursor-pointer shrink-0"
+          >
+            <UserPlus className="w-4 h-4" />
+            <span>+ Register Custom Personnel ID</span>
+          </button>
+        </div>
+
+        {/* Cards Grid */}
+        {livePersonsList.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {livePersonsList.map((p) => {
+              const reg = (registeredPersonnel || []).find(
+                (r) => r.track_id === p.trackId || r.id === p.trackId
+              );
+              return (
+                <div
+                  key={p.trackId}
+                  className={`p-4 rounded-xl border transition-all space-y-2.5 ${
+                    reg
+                      ? "bg-slate-950/90 border-emerald-500/40 shadow-emerald-950/20"
+                      : "bg-slate-950/70 border-slate-800"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono font-bold text-xs text-sky-300">
+                      {reg ? `${reg.id}` : p.trackId}
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[9px] font-extrabold uppercase tracking-wider ${
+                        reg
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                      }`}
+                    >
+                      {reg ? "REGISTERED WORKER" : "UNREGISTERED WORKER"}
+                    </span>
+                  </div>
+
+                  {reg && (
+                    <div className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{reg.name}</span>
+                      <span className="text-[10px] text-slate-400 font-normal">({reg.designation})</span>
+                    </div>
+                  )}
+
+                  <div className="text-xs space-y-1 text-slate-300">
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-slate-400">Confidence:</span>
+                      <span className="font-mono font-bold text-slate-200">
+                        {Math.round((p.confidence || 0.88) * 100)}%
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-slate-400">Helmet Status:</span>
+                      <span
+                        className={`font-semibold ${
+                          p.hasHelmet ? "text-emerald-400" : "text-red-400"
+                        }`}
+                      >
+                        {p.hasHelmet ? "✅ Helmet OK" : "❌ No Helmet"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleOpenRegisterModal(p.trackId)}
+                    className={`w-full py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+                      reg
+                        ? "bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700"
+                        : "bg-cyan-600 hover:bg-cyan-500 text-white shadow-md shadow-cyan-600/20"
+                    }`}
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>{reg ? "Edit Registration" : "Register This Live Person"}</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="p-6 text-center text-slate-400 text-xs border border-dashed border-slate-800 rounded-xl space-y-2">
+            <Users className="w-8 h-8 text-slate-600 mx-auto" />
+            <p className="font-semibold text-slate-300">No active persons detected in camera frame currently</p>
+            <p className="text-[11px] text-slate-500">
+              When a worker appears in front of the camera, their live card will display here with direct registration controls.
+            </p>
+          </div>
+        )}
+      </div>
+
       {/* AI Technical Criteria Description */}
       <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-4 text-xs text-slate-700">
         <div className="flex items-center gap-2 font-bold text-sm text-slate-900">
@@ -798,6 +996,117 @@ export default function LiveMonitoringView() {
           </div>
         </div>
       </div>
+
+      {/* Quick Registration Modal */}
+      {isRegisterModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 text-slate-100 w-full max-w-md p-6 rounded-2xl shadow-2xl space-y-5 animate-fadeIn">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  <UserCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-100">Register Personnel Identity</h3>
+                  <p className="text-[11px] text-slate-400">Save unique ID and name to SQLite database</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsRegisterModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {regSuccessMsg && (
+              <div className="p-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 rounded-xl text-xs flex items-center gap-2 font-semibold">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{regSuccessMsg}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveRegistration} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Live Track ID</label>
+                <input
+                  type="text"
+                  value={registrationForm.track_id}
+                  onChange={(e) => setRegistrationForm({ ...registrationForm, track_id: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sky-400 font-mono font-bold focus:outline-none focus:border-sky-500"
+                  placeholder="e.g. TRK-P109"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Unique Personnel / Employee ID</label>
+                <input
+                  type="text"
+                  value={registrationForm.id}
+                  onChange={(e) => setRegistrationForm({ ...registrationForm, id: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 font-mono font-bold focus:outline-none focus:border-sky-500"
+                  placeholder="e.g. EMP-109"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Full Name</label>
+                <input
+                  type="text"
+                  value={registrationForm.name}
+                  onChange={(e) => setRegistrationForm({ ...registrationForm, name: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 font-medium focus:outline-none focus:border-sky-500"
+                  placeholder="e.g. Shiv Kumar"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Role / Designation</label>
+                  <input
+                    type="text"
+                    value={registrationForm.designation}
+                    onChange={(e) => setRegistrationForm({ ...registrationForm, designation: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 font-medium focus:outline-none focus:border-sky-500"
+                    placeholder="e.g. Senior Field Engineer"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Department</label>
+                  <input
+                    type="text"
+                    value={registrationForm.department}
+                    onChange={(e) => setRegistrationForm({ ...registrationForm, department: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 font-medium focus:outline-none focus:border-sky-500"
+                    placeholder="e.g. Refinery Operations"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsRegisterModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-lg shadow-emerald-600/30 flex items-center gap-2 cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Save & Register Profile</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

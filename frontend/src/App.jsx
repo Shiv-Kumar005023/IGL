@@ -8,9 +8,11 @@ import EvidenceModal from "./components/EvidenceModal";
 import DashboardView from "./views/DashboardView";
 import CameraInputView from "./views/CameraInputView";
 import LiveMonitoringView from "./views/LiveMonitoringView";
+import ExpectedPersonnelView from "./views/ExpectedPersonnelView";
 import PackagingInspectionView from "./views/PackagingInspectionView";
 import AlertsView from "./views/AlertsView";
 import PersonnelAnomalyView from "./views/PersonnelAnomalyView";
+import PersonnelMonitoringView from "./views/PersonnelMonitoringView";
 import NearMissView from "./views/NearMissView";
 import CameraHealthView from "./views/CameraHealthView";
 import AnalyticsView from "./views/AnalyticsView";
@@ -24,6 +26,8 @@ function MainContent() {
       {activeTab === "dashboard" && <DashboardView />}
       {activeTab === "camera-input" && <CameraInputView />}
       {activeTab === "live-monitoring" && <LiveMonitoringView />}
+      {activeTab === "expected-personnel" && <ExpectedPersonnelView />}
+      {activeTab === "personnel-monitoring" && <PersonnelMonitoringView />}
       {activeTab === "packaging" && <PackagingInspectionView />}
       {activeTab === "alerts" && <AlertsView />}
       {activeTab === "personnel" && <PersonnelAnomalyView />}

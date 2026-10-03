@@ -12,7 +12,27 @@ import {
   fetchRestrictedZones,
   postRestrictedZoneApi,
   fetchAnalyticsApi,
-  registerCameraApi
+  registerCameraApi,
+  fetchPersonnelRulesApi,
+  createPersonnelRuleApi,
+  updatePersonnelRuleApi,
+  deletePersonnelRuleApi,
+  fetchPersonnelEventsApi,
+  postPersonnelEventApi,
+  acknowledgePersonnelEventApi,
+  resolvePersonnelEventApi,
+  fetchExpectedPersonnelRulesApi,
+  createExpectedPersonnelRuleApi,
+  updateExpectedPersonnelRuleApi,
+  deleteExpectedPersonnelRuleApi,
+  fetchWhatsAppStatusApi,
+  testWhatsAppAlertApi,
+  sendUnknownPersonAlertApi,
+  fetchNotificationLogsApi,
+  fetchRegisteredPersonnelApi,
+  createRegisteredPersonnelApi,
+  updateRegisteredPersonnelApi,
+  deleteRegisteredPersonnelApi
 } from "../services/api";
 
 const SafetyContext = createContext(null);
@@ -54,6 +74,40 @@ export function SafetyProvider({ children }) {
   const [restrictedZones, setRestrictedZones] = useState([]);
   const [selectedEvidence, setSelectedEvidence] = useState(null);
 
+  // Personnel Monitoring DB States
+  const [personnelRules, setPersonnelRules] = useState([
+    {
+      id: 1,
+      camera_id: "Gate Camera 01",
+      camera_name: "Gate Camera 01 (Main Entry)",
+      area_id: "Main Entry Area",
+      schedule_date: "ALL",
+      start_time: "00:00",
+      end_time: "23:59",
+      expected_person_count: 2,
+      verification_duration: 10,
+      cooldown: 60,
+      enabled: 1
+    }
+  ]);
+  const [personnelEvents, setPersonnelEvents] = useState([]);
+
+  // Registered Personnel Identity DB State
+  const [registeredPersonnel, setRegisteredPersonnel] = useState([
+    { id: "EMP-101", track_id: "TRK-P101", name: "Shiv Kumar", designation: "Senior Field Engineer", department: "Refinery Operations" },
+    { id: "EMP-102", track_id: "TRK-P102", name: "Rajesh Sharma", designation: "Plant Safety Officer", department: "HSE Department" }
+  ]);
+
+  // Expected Personnel & WhatsApp Notification States
+  const [expectedPersonnelRules, setExpectedPersonnelRules] = useState([]);
+  const [whatsappStatus, setWhatsappStatus] = useState({
+    status: "MOCK MODE",
+    mode: "MOCK",
+    is_configured: false,
+    controller_number: ""
+  });
+  const [notificationLogs, setNotificationLogs] = useState([]);
+
   // Audio alert trigger
   const playAlertSound = useCallback(() => {
     try {
@@ -72,22 +126,49 @@ export function SafetyProvider({ children }) {
     } catch (e) {}
   }, []);
 
-  // Synchronize state with SQLite backend
+  // Synchronize state with SQLite backend (Parallel Async Processing for Maximum Speed)
   const refreshBackendData = useCallback(async () => {
-    const newStats = await fetchStats();
-    if (newStats) setStats(newStats);
+    try {
+      const [
+        newStats,
+        newAlerts,
+        newCams,
+        newObs,
+        newZones,
+        rules,
+        pEvents,
+        expRules,
+        waStatus,
+        logs,
+        regPersonnel
+      ] = await Promise.all([
+        fetchStats(),
+        fetchAlerts(),
+        fetchCameras(),
+        fetchObservations(),
+        fetchRestrictedZones(),
+        fetchPersonnelRulesApi(),
+        fetchPersonnelEventsApi(),
+        fetchExpectedPersonnelRulesApi(),
+        fetchWhatsAppStatusApi(),
+        fetchNotificationLogsApi(),
+        fetchRegisteredPersonnelApi()
+      ]);
 
-    const newAlerts = await fetchAlerts();
-    if (newAlerts) setAlerts(newAlerts);
-
-    const newCams = await fetchCameras();
-    if (newCams) setCameras(newCams);
-
-    const newObs = await fetchObservations();
-    if (newObs) setObservations(newObs);
-
-    const newZones = await fetchRestrictedZones();
-    if (newZones) setRestrictedZones(newZones);
+      if (newStats) setStats(newStats);
+      if (newAlerts) setAlerts(newAlerts);
+      if (newCams) setCameras(newCams);
+      if (newObs) setObservations(newObs);
+      if (newZones) setRestrictedZones(newZones);
+      if (rules !== null && Array.isArray(rules)) setPersonnelRules(rules);
+      if (pEvents !== null && Array.isArray(pEvents)) setPersonnelEvents(pEvents);
+      if (expRules) setExpectedPersonnelRules(expRules);
+      if (waStatus) setWhatsappStatus(waStatus);
+      if (logs) setNotificationLogs(logs);
+      if (regPersonnel && regPersonnel.length > 0) setRegisteredPersonnel(regPersonnel);
+    } catch (err) {
+      console.warn("Backend sync warning:", err);
+    }
   }, []);
 
   // Poll SQLite DB every 3 seconds for updates
@@ -217,6 +298,139 @@ export function SafetyProvider({ children }) {
     await refreshBackendData();
   };
 
+  // Personnel Monitoring Schedule Actions
+  const addPersonnelRule = async (ruleData) => {
+    const tempRule = {
+      id: Date.now(),
+      camera_id: ruleData.camera_id || "Gate Camera 01",
+      camera_name: ruleData.camera_id || "Gate Camera 01",
+      area_id: ruleData.area_id || "Main Entry Area",
+      schedule_date: ruleData.schedule_date || "ALL",
+      start_time: ruleData.start_time || "00:00",
+      end_time: ruleData.end_time || "23:59",
+      expected_person_count: Number(ruleData.expected_person_count) ?? 2,
+      verification_duration: Number(ruleData.verification_duration) ?? 10,
+      cooldown: 60,
+      enabled: 1
+    };
+    setPersonnelRules((prev) => [tempRule, ...prev.filter((r) => r.id !== tempRule.id)]);
+    const res = await createPersonnelRuleApi(ruleData);
+    if (res && res.rule_id) {
+      tempRule.id = res.rule_id;
+      setPersonnelRules((prev) => [
+        tempRule,
+        ...prev.filter((r) => r.id !== tempRule.id && r.id !== res.rule_id)
+      ]);
+    }
+    await refreshBackendData();
+    return res || tempRule;
+  };
+
+  const updatePersonnelRule = async (ruleId, ruleData) => {
+    setPersonnelRules((prev) =>
+      prev.map((r) => (r.id === ruleId ? { ...r, ...ruleData } : r))
+    );
+    const res = await updatePersonnelRuleApi(ruleId, ruleData);
+    await refreshBackendData();
+    return res;
+  };
+
+  const removePersonnelRule = async (ruleId) => {
+    setPersonnelRules((prev) => prev.filter((r) => r.id !== ruleId));
+    const res = await deletePersonnelRuleApi(ruleId);
+    await refreshBackendData();
+    return res;
+  };
+
+  const dispatchPersonnelEvent = async (eventData) => {
+    playAlertSound();
+    const res = await postPersonnelEventApi(eventData);
+    refreshBackendData();
+    return res;
+  };
+
+  const acknowledgePersonnelEvent = async (eventId, user = "Controller") => {
+    setPersonnelEvents((prev) =>
+      prev.map((e) => (e.id === eventId ? { ...e, status: "ACKNOWLEDGED" } : e))
+    );
+    await acknowledgePersonnelEventApi(eventId, user);
+    refreshBackendData();
+  };
+
+  const resolvePersonnelEvent = async (eventId, notes = "Verified", user = "Safety Manager") => {
+    setPersonnelEvents((prev) =>
+      prev.map((e) => (e.id === eventId ? { ...e, status: "RESOLVED" } : e))
+    );
+    await resolvePersonnelEventApi(eventId, notes, user);
+    refreshBackendData();
+  };
+
+  // Expected Personnel Rule Actions
+  const addExpectedPersonnelRule = async (ruleData) => {
+    const tempRule = { id: Date.now(), ...ruleData, enabled: 1 };
+    setExpectedPersonnelRules((prev) => [tempRule, ...prev]);
+    const res = await createExpectedPersonnelRuleApi(ruleData);
+    refreshBackendData();
+    return res;
+  };
+
+  const updateExpectedPersonnelRule = async (ruleId, ruleData) => {
+    setExpectedPersonnelRules((prev) =>
+      prev.map((r) => (r.id === ruleId ? { ...r, ...ruleData } : r))
+    );
+    const res = await updateExpectedPersonnelRuleApi(ruleId, ruleData);
+    refreshBackendData();
+    return res;
+  };
+
+  const removeExpectedPersonnelRule = async (ruleId) => {
+    setExpectedPersonnelRules((prev) => prev.filter((r) => r.id !== ruleId));
+    const res = await deleteExpectedPersonnelRuleApi(ruleId);
+    refreshBackendData();
+    return res;
+  };
+
+  // WhatsApp Alert Testing and Dispatch
+  const triggerTestWhatsApp = async (controllerWhatsapp = null) => {
+    const res = await testWhatsAppAlertApi(controllerWhatsapp);
+    await refreshBackendData();
+    return res;
+  };
+
+  const triggerUnknownPersonWhatsAppAlert = async (eventData) => {
+    playAlertSound();
+    const res = await sendUnknownPersonAlertApi(eventData);
+    await refreshBackendData();
+    return res;
+  };
+
+  // Registered Personnel Identity Registration Handlers
+  const registerPerson = async (personData) => {
+    setRegisteredPersonnel((prev) => [
+      ...prev.filter((p) => p.id !== personData.id && p.track_id !== personData.track_id),
+      personData
+    ]);
+    const res = await createRegisteredPersonnelApi(personData);
+    await refreshBackendData();
+    return res;
+  };
+
+  const updatePersonRegistration = async (personId, personData) => {
+    setRegisteredPersonnel((prev) =>
+      prev.map((p) => (p.id === personId ? { ...p, ...personData } : p))
+    );
+    const res = await updateRegisteredPersonnelApi(personId, personData);
+    await refreshBackendData();
+    return res;
+  };
+
+  const removePersonRegistration = async (personId) => {
+    setRegisteredPersonnel((prev) => prev.filter((p) => p.id !== personId));
+    const res = await deleteRegisteredPersonnelApi(personId);
+    await refreshBackendData();
+    return res;
+  };
+
   return (
     <SafetyContext.Provider
       value={{
@@ -244,6 +458,26 @@ export function SafetyProvider({ children }) {
         addRestrictedZone,
         selectedEvidence,
         setSelectedEvidence,
+        personnelRules,
+        personnelEvents,
+        addPersonnelRule,
+        updatePersonnelRule,
+        removePersonnelRule,
+        dispatchPersonnelEvent,
+        acknowledgePersonnelEvent,
+        resolvePersonnelEvent,
+        registeredPersonnel,
+        registerPerson,
+        updatePersonRegistration,
+        removePersonRegistration,
+        expectedPersonnelRules,
+        whatsappStatus,
+        notificationLogs,
+        addExpectedPersonnelRule,
+        updateExpectedPersonnelRule,
+        removeExpectedPersonnelRule,
+        triggerTestWhatsApp,
+        triggerUnknownPersonWhatsAppAlert,
         refreshBackendData
       }}
     >

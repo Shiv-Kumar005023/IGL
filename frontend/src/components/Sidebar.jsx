@@ -10,18 +10,25 @@ import {
   Settings,
   ShieldCheck,
   Camera,
-  Boxes
+  Boxes,
+  UserCheck,
+  Users
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 
 export default function Sidebar() {
-  const { activeTab, setActiveTab, stats } = useSafety();
+  const { activeTab, setActiveTab, stats, personnelEvents, alerts } = useSafety();
+
+  const activePersonnelAlerts = (personnelEvents || []).filter(e => e.status !== "RESOLVED").length;
+  const unknownAlerts = (alerts || []).filter(a => a.event_type === "UNKNOWN_PERSON" && a.status !== "RESOLVED").length;
 
   const navItems = [
     { id: "dashboard", label: "Overview", icon: Home },
     { id: "camera-input", label: "Camera Setup", icon: Camera, badge: stats.cameras_online > 0 ? "LIVE" : null },
     { id: "live-monitoring", label: "Live Monitoring", icon: Tv },
-    { id: "packaging", label: "Packaging Inspection", icon: Boxes, badge: "NEW" },
+    { id: "expected-personnel", label: "Expected Personnel", icon: UserCheck, badge: unknownAlerts > 0 ? unknownAlerts : "ALERT" },
+    { id: "personnel-monitoring", label: "Personnel Monitoring", icon: Users, badge: activePersonnelAlerts > 0 ? activePersonnelAlerts : "NEW" },
+    { id: "packaging", label: "Packaging Inspection", icon: Boxes },
     { id: "alerts", label: "Safety Events", icon: ShieldAlert, badge: stats.active_alerts > 0 ? stats.active_alerts : null },
     { id: "near-miss", label: "Near Miss", icon: AlertTriangle },
     { id: "personnel", label: "Incidents", icon: Flame },

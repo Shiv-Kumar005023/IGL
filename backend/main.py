@@ -10,6 +10,7 @@ import os
 
 from database import init_db, get_db_connection
 from ai_engine import assess_frame_quality, is_point_in_polygon, calculate_distance
+from whatsapp_service import get_whatsapp_status_info, send_whatsapp_test, send_whatsapp_alert
 
 app = FastAPI(title="IGL Industrial AI Safety Intelligence API", version="1.0.0")
 
@@ -447,6 +448,475 @@ def get_analytics():
         "severity_breakdown": severity_counts
     }
 
+# ----------------------------------------------------
+# PERSONNEL MONITORING ENDPOINTS
+# ----------------------------------------------------
+@app.get("/api/personnel-monitoring/rules")
+def get_personnel_monitoring_rules():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM personnel_monitoring_rules ORDER BY start_time ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/personnel-monitoring/rules")
+def create_personnel_monitoring_rule(payload: dict = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    camera_id = payload.get("camera_id", "Gate Camera 01")
+    camera_name = payload.get("camera_name", payload.get("camera_id", "Gate Camera 01"))
+    area_id = payload.get("area_id", "Main Entry Area")
+    schedule_date = payload.get("schedule_date", "ALL")
+    start_time = payload.get("start_time", "18:00")
+    end_time = payload.get("end_time", "22:00")
+    expected_person_count = int(payload.get("expected_person_count", 2))
+    verification_duration = int(payload.get("verification_duration", 10))
+    cooldown = int(payload.get("cooldown", 60))
+    enabled = int(payload.get("enabled", 1))
+
+    now = datetime.now().isoformat()
+
+    cursor.execute("""
+    INSERT INTO personnel_monitoring_rules (
+        camera_id, camera_name, area_id, schedule_date, start_time, end_time,
+        expected_person_count, verification_duration, cooldown, enabled, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        camera_id, camera_name, area_id, schedule_date, start_time, end_time,
+        expected_person_count, verification_duration, cooldown, enabled, now, now
+    ))
+
+    rule_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return {"status": "SUCCESS", "rule_id": rule_id, "message": "Personnel monitoring schedule rule created"}
+
+@app.put("/api/personnel-monitoring/rules/{rule_id}")
+def update_personnel_monitoring_rule(rule_id: int, payload: dict = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    camera_id = payload.get("camera_id", "Gate Camera 01")
+    camera_name = payload.get("camera_name", camera_id)
+    area_id = payload.get("area_id", "Main Entry Area")
+    schedule_date = payload.get("schedule_date", "ALL")
+    start_time = payload.get("start_time", "18:00")
+    end_time = payload.get("end_time", "22:00")
+    expected_person_count = int(payload.get("expected_person_count", 2))
+    verification_duration = int(payload.get("verification_duration", 10))
+    cooldown = int(payload.get("cooldown", 60))
+    enabled = int(payload.get("enabled", 1))
+    now = datetime.now().isoformat()
+
+    cursor.execute("""
+    UPDATE personnel_monitoring_rules
+    SET camera_id = ?, camera_name = ?, area_id = ?, schedule_date = ?, start_time = ?, end_time = ?,
+        expected_person_count = ?, verification_duration = ?, cooldown = ?, enabled = ?, updated_at = ?
+    WHERE id = ?
+    """, (
+        camera_id, camera_name, area_id, schedule_date, start_time, end_time,
+        expected_person_count, verification_duration, cooldown, enabled, now, rule_id
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return {"status": "SUCCESS", "rule_id": rule_id, "message": "Personnel monitoring rule updated"}
+
+@app.delete("/api/personnel-monitoring/rules/{rule_id}")
+def delete_personnel_monitoring_rule(rule_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM personnel_monitoring_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "SUCCESS", "rule_id": rule_id, "message": "Personnel monitoring rule deleted"}
+
+@app.get("/api/personnel-monitoring/events")
+def get_personnel_monitoring_events():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM personnel_monitoring_events ORDER BY timestamp DESC LIMIT 50")
+    rows = cursor.fetchall()
+    conn.close()
+
+    events = []
+    for row in rows:
+        evt = dict(row)
+        if evt.get("track_ids"):
+            try:
+                evt["track_ids"] = json.loads(evt["track_ids"])
+            except:
+                evt["track_ids"] = []
+        events.append(evt)
+
+    return events
+
+@app.post("/api/personnel-monitoring/events")
+def create_personnel_monitoring_event(payload: dict = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    event_id = f"PME-{uuid.uuid4().hex[:8].upper()}"
+    rule_id = payload.get("rule_id", None)
+    camera_id = payload.get("camera_id", "Gate Camera 01")
+    camera_name = payload.get("camera_name", "Gate Camera 01")
+    area_name = payload.get("area_name", "Configured Area")
+    expected_count = int(payload.get("expected_count", 2))
+    observed_count = int(payload.get("observed_count", 5))
+    additional_count = int(payload.get("additional_count", max(0, observed_count - expected_count)))
+    verification_duration = int(payload.get("verification_duration", 10))
+    evidence_reference = payload.get("evidence_reference", "")
+    track_ids = payload.get("track_ids", [])
+    now = datetime.now().isoformat()
+
+    # Record event in personnel_monitoring_events table
+    cursor.execute("""
+    INSERT INTO personnel_monitoring_events (
+        id, rule_id, camera_id, camera_name, area_name, timestamp,
+        expected_count, observed_count, additional_count, verification_duration,
+        status, evidence_reference, track_ids
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DETECTED', ?, ?)
+    """, (
+        event_id, rule_id, camera_id, camera_name, area_name, now,
+        expected_count, observed_count, additional_count, verification_duration,
+        evidence_reference, json.dumps(track_ids)
+    ))
+
+    # Also register in central alerts table as PERSONNEL_ANOMALY
+    alert_id = f"ALT-PME-{uuid.uuid4().hex[:6].upper()}"
+    metadata = {
+        "expected_count": expected_count,
+        "observed_count": observed_count,
+        "additional_count": additional_count,
+        "verification_duration": verification_duration,
+        "track_ids": track_ids,
+        "pme_event_id": event_id
+    }
+
+    cursor.execute("""
+    INSERT INTO alerts (
+        id, event_type, camera_id, camera_name, zone_name, severity, status, 
+        confidence, evidence_image_base64, metadata_json, detected_at
+    ) VALUES (?, 'PERSONNEL_ANOMALY', ?, ?, ?, 'HIGH', 'DETECTED', 0.98, ?, ?, ?)
+    """, (
+        alert_id, camera_id, camera_name, area_name,
+        evidence_reference, json.dumps(metadata), now
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return {"status": "SUCCESS", "event_id": event_id, "alert_id": alert_id, "timestamp": now}
+
+@app.put("/api/personnel-monitoring/events/{event_id}/acknowledge")
+def acknowledge_personnel_monitoring_event(event_id: str, payload: dict = Body(...)):
+    user = payload.get("user", "Controller / Safety Officer")
+    now = datetime.now().isoformat()
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    UPDATE personnel_monitoring_events 
+    SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?
+    WHERE id = ?
+    """, (now, user, event_id))
+
+    # Sync linked alert if present
+    cursor.execute("""
+    UPDATE alerts 
+    SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?
+    WHERE metadata_json LIKE ?
+    """, (now, user, f'%"{event_id}"%'))
+
+    conn.commit()
+    conn.close()
+
+    return {"status": "ACKNOWLEDGED", "event_id": event_id, "time": now}
+
+@app.put("/api/personnel-monitoring/events/{event_id}/resolve")
+def resolve_personnel_monitoring_event(event_id: str, payload: dict = Body(...)):
+    user = payload.get("user", "Safety Manager")
+    notes = payload.get("notes", "Personnel count verified and anomaly resolved.")
+    now = datetime.now().isoformat()
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    UPDATE personnel_monitoring_events 
+    SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?
+    WHERE id = ?
+    """, (now, user, event_id))
+
+    # Sync linked alert if present
+    cursor.execute("""
+    UPDATE alerts 
+    SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, resolution_notes = ?
+    WHERE metadata_json LIKE ?
+    """, (now, user, notes, f'%"{event_id}"%'))
+
+    conn.commit()
+    conn.close()
+
+    return {"status": "RESOLVED", "event_id": event_id, "time": now}
+
+# ----------------------------------------------------
+# EXPECTED PERSONNEL & UNKNOWN PERSON ALERT ENDPOINTS
+# ----------------------------------------------------
+@app.get("/api/expected-personnel/rules")
+def get_expected_personnel_rules():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM expected_personnel_rules ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/expected-personnel/rules")
+def create_expected_personnel_rule(payload: dict = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    rule_name = payload.get("rule_name", "Expected Personnel Rule")
+    zone_name = payload.get("zone_name", "Main Plant Area")
+    camera_id = payload.get("camera_id", "Gate Camera 01")
+    start_time = payload.get("start_time", "19:00")
+    end_time = payload.get("end_time", "06:00")
+    expected_person_count = int(payload.get("expected_person_count", 2))
+    verification_duration = int(payload.get("verification_duration", 10))
+    cooldown = int(payload.get("cooldown", 300))
+    controller_whatsapp = payload.get("controller_whatsapp", "")
+    whatsapp_enabled = 1 if payload.get("whatsapp_enabled", True) else 0
+    enabled = 1 if payload.get("enabled", True) else 0
+    now = datetime.now().isoformat()
+
+    cursor.execute("""
+    INSERT INTO expected_personnel_rules (
+        rule_name, zone_name, camera_id, start_time, end_time, expected_person_count,
+        verification_duration, cooldown, controller_whatsapp, whatsapp_enabled, enabled, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        rule_name, zone_name, camera_id, start_time, end_time, expected_person_count,
+        verification_duration, cooldown, controller_whatsapp, whatsapp_enabled, enabled, now, now
+    ))
+
+    rule_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return {"status": "SUCCESS", "rule_id": rule_id, "message": "Expected Personnel Rule saved successfully"}
+
+@app.put("/api/expected-personnel/rules/{rule_id}")
+def update_expected_personnel_rule(rule_id: int, payload: dict = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    rule_name = payload.get("rule_name", "Expected Personnel Rule")
+    zone_name = payload.get("zone_name", "Main Plant Area")
+    camera_id = payload.get("camera_id", "Gate Camera 01")
+    start_time = payload.get("start_time", "19:00")
+    end_time = payload.get("end_time", "06:00")
+    expected_person_count = int(payload.get("expected_person_count", 2))
+    verification_duration = int(payload.get("verification_duration", 10))
+    cooldown = int(payload.get("cooldown", 300))
+    controller_whatsapp = payload.get("controller_whatsapp", "")
+    whatsapp_enabled = 1 if payload.get("whatsapp_enabled", True) else 0
+    enabled = 1 if payload.get("enabled", True) else 0
+    now = datetime.now().isoformat()
+
+    cursor.execute("""
+    UPDATE expected_personnel_rules
+    SET rule_name = ?, zone_name = ?, camera_id = ?, start_time = ?, end_time = ?,
+        expected_person_count = ?, verification_duration = ?, cooldown = ?,
+        controller_whatsapp = ?, whatsapp_enabled = ?, enabled = ?, updated_at = ?
+    WHERE id = ?
+    """, (
+        rule_name, zone_name, camera_id, start_time, end_time, expected_person_count,
+        verification_duration, cooldown, controller_whatsapp, whatsapp_enabled, enabled, now, rule_id
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return {"status": "SUCCESS", "rule_id": rule_id, "message": "Expected Personnel Rule updated successfully"}
+
+@app.delete("/api/expected-personnel/rules/{rule_id}")
+def delete_expected_personnel_rule(rule_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM expected_personnel_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "SUCCESS", "rule_id": rule_id, "message": "Expected Personnel Rule deleted successfully"}
+
+# ----------------------------------------------------
+# WHATSAPP NOTIFICATION ENDPOINTS
+# ----------------------------------------------------
+@app.get("/api/notifications/whatsapp/status")
+def get_whatsapp_status():
+    """
+    Returns WhatsApp API connection status, mode (MOCK/LIVE), and last notification log.
+    Never exposes secrets or API access tokens.
+    """
+    return get_whatsapp_status_info()
+
+@app.post("/api/notifications/whatsapp/test")
+def test_whatsapp_notification(payload: dict = Body({})):
+    """
+    Triggered by [Test WhatsApp Alert] button in settings.
+    In mock mode: logs message to terminal and returns SIMULATED status.
+    In live mode: executes WhatsApp Cloud API call securely.
+    """
+    recipient = payload.get("controller_whatsapp", None)
+    result = send_whatsapp_test(recipient_override=recipient)
+    return result
+
+@app.post("/api/notifications/whatsapp/send")
+def send_unknown_person_whatsapp_alert(payload: dict = Body(...)):
+    """
+    Backend service endpoint triggered when an Unknown/Unaccounted Person Event passes temporal verification.
+    Registers alert in central alerts DB table and sends WhatsApp notification.
+    """
+    event_id = payload.get("eventId", f"EVT-UNK-{uuid.uuid4().hex[:8].upper()}")
+    zone = payload.get("zone", "Main Plant Area")
+    camera = payload.get("camera", "Gate Camera 01")
+    expected_count = int(payload.get("expectedCount", 2))
+    detected_count = int(payload.get("detectedCount", 5))
+    additional_count = int(payload.get("additionalCount", max(0, detected_count - expected_count)))
+    track_ids = payload.get("involvedTrackIds", ["TRK-P103", "TRK-P104", "TRK-P105"])
+    evidence_image = payload.get("evidenceSnapshot", "")
+    now = datetime.now().isoformat()
+
+    # Register in central alerts table as UNKNOWN_PERSON
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    alert_id = f"ALT-UNK-{uuid.uuid4().hex[:6].upper()}"
+    metadata = {
+        "event_id": event_id,
+        "expected_count": expected_count,
+        "detected_count": detected_count,
+        "additional_count": additional_count,
+        "track_ids": track_ids,
+        "source": "LIVE_CAMERA",
+        "mode": "PROTOTYPE",
+        "verification_status": "REVIEW REQUIRED"
+    }
+
+    cursor.execute("""
+    INSERT INTO alerts (
+        id, event_type, camera_id, camera_name, zone_name, severity, status, 
+        confidence, evidence_image_base64, metadata_json, detected_at
+    ) VALUES (?, 'UNKNOWN_PERSON', ?, ?, ?, 'HIGH', 'DETECTED', 0.96, ?, ?, ?)
+    """, (
+        alert_id, camera, camera, zone, evidence_image, json.dumps(metadata), now
+    ))
+    conn.commit()
+    conn.close()
+
+    # Send WhatsApp notification via whatsapp_service
+    wa_result = send_whatsapp_alert(payload)
+
+    return {
+        "status": "SUCCESS",
+        "event_id": event_id,
+        "alert_id": alert_id,
+        "whatsapp_result": wa_result
+    }
+
+@app.get("/api/notifications/logs")
+def get_notification_logs():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM notification_logs ORDER BY timestamp DESC LIMIT 50")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+# ----------------------------------------------------
+# REGISTERED PERSONNEL IDENTITY ENDPOINTS
+# ----------------------------------------------------
+@app.get("/api/registered-personnel")
+def list_registered_personnel():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM registered_personnel ORDER BY registered_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/registered-personnel")
+def create_registered_person(payload: dict = Body(...)):
+    person_id = payload.get("id") or f"EMP-{uuid.uuid4().hex[:4].upper()}"
+    track_id = payload.get("track_id") or ""
+    name = payload.get("name", "Registered Worker")
+    designation = payload.get("designation", "Registered Worker")
+    department = payload.get("department", "Operations")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO registered_personnel (id, track_id, name, designation, department)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        track_id = excluded.track_id,
+        name = excluded.name,
+        designation = excluded.designation,
+        department = excluded.department,
+        updated_at = CURRENT_TIMESTAMP
+    """, (person_id, track_id, name, designation, department))
+
+    conn.commit()
+    conn.close()
+    return {
+        "status": "SUCCESS",
+        "id": person_id,
+        "track_id": track_id,
+        "name": name,
+        "designation": designation,
+        "department": department
+    }
+
+@app.put("/api/registered-personnel/{person_id}")
+def update_registered_person(person_id: str, payload: dict = Body(...)):
+    name = payload.get("name")
+    track_id = payload.get("track_id")
+    designation = payload.get("designation")
+    department = payload.get("department")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    UPDATE registered_personnel
+    SET name = COALESCE(?, name),
+        track_id = COALESCE(?, track_id),
+        designation = COALESCE(?, designation),
+        department = COALESCE(?, department),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+    """, (name, track_id, designation, department, person_id))
+
+    conn.commit()
+    conn.close()
+    return {"status": "SUCCESS", "id": person_id}
+
+@app.delete("/api/registered-personnel/{person_id}")
+def delete_registered_person(person_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM registered_personnel WHERE id = ?", (person_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "SUCCESS", "id": person_id}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
