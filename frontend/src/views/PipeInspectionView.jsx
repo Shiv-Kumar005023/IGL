@@ -20,13 +20,13 @@ import {
   ChevronDown,
   ChevronUp,
   Layers,
-  CheckCircle,
-  XCircle,
-  Radio,
-  Clock,
   Box,
   Laptop,
   Briefcase,
+  Pipette,
+  Radio,
+  Clock,
+  Shield,
   Car,
   Droplets,
   Volume2,
@@ -43,7 +43,7 @@ import {
   getModelStatus
 } from "../services/realVisionProcessor";
 
-export default function ImageCameraInspectionView() {
+export default function PipeInspectionView() {
   const {
     activeStream,
     streamSource,
@@ -63,7 +63,7 @@ export default function ImageCameraInspectionView() {
   const canvasRef = useRef(null);
   const imageRef = useRef(null);
 
-  // Input Mode: "camera" (Live Camera) vs "image" (Upload Image)
+  // Input Mode: "camera" (Live Camera Feed) vs "image" (Upload Pipe Image)
   const [inputMode, setInputMode] = useState("camera");
   const [cameraError, setCameraError] = useState(null);
   const [isConnectingCam, setIsConnectingCam] = useState(false);
@@ -84,7 +84,7 @@ export default function ImageCameraInspectionView() {
 
   // Real Frame Counter & Timestamps
   const [framesAnalyzedCount, setFramesAnalyzedCount] = useState(0);
-  const [lastAnalysisTimestamp, setLastAnalysisTimestamp] = useState("Not started");
+  const [lastAnalysisTimestamp, setLastAnalysisTimestamp] = useState("Awaiting Input");
 
   // Model & Detection State
   const [modelInfo, setModelInfo] = useState({ status: "UNINITIALIZED", errorMessage: "" });
@@ -169,13 +169,22 @@ export default function ImageCameraInspectionView() {
     };
   }, []);
 
-  // Attach Stream to Hidden Video Element when in Camera Mode
+  // Attach Stream to Hidden Video Element whenever activeStream or inputMode changes
   useEffect(() => {
     if (videoRef.current && activeStream && activeStream instanceof MediaStream) {
-      videoRef.current.srcObject = activeStream;
+      if (videoRef.current.srcObject !== activeStream) {
+        videoRef.current.srcObject = activeStream;
+      }
       videoRef.current.play().catch((e) => console.log("Video playback error:", e));
     }
-  }, [activeStream]);
+  }, [activeStream, inputMode]);
+
+  // Auto-connect webcam on component mount if camera mode active & no stream exists
+  useEffect(() => {
+    if (inputMode === "camera" && !activeStream && !isConnectingCam && !cameraError) {
+      handleSelectLiveCamera();
+    }
+  }, [inputMode]);
 
   // Handle Mode Switch to Live Camera
   const handleSelectLiveCamera = async () => {
@@ -204,7 +213,7 @@ export default function ImageCameraInspectionView() {
 
   // Handle Image File Upload (JPG, JPEG, PNG)
   const handleImageUpload = async (e) => {
-    const file = e.target.files[0];
+    const file = e.target.files?.[0];
     if (file) {
       setInputMode("image");
       setCameraError(null);
@@ -228,284 +237,288 @@ export default function ImageCameraInspectionView() {
       const isVideoSource = inputMode === "camera" && video && (video.readyState >= 2 || video.videoWidth > 0);
       const sourceElem = isImageSource ? img : isVideoSource ? video : null;
 
-      if (sourceElem && canvas) {
-        if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-          canvas.width = canvas.clientWidth || 640;
-          canvas.height = canvas.clientHeight || 360;
+      if (canvas) {
+        // Ensure default canvas dimensions if container not sized yet
+        const targetW = canvas.clientWidth || 640;
+        const targetH = canvas.clientHeight || 360;
+
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+          canvas.width = targetW;
+          canvas.height = targetH;
         }
 
         const ctx = canvas.getContext("2d");
         const width = canvas.width;
         const height = canvas.height;
 
-        // Draw current frame onto canvas
-        if (isMirrored && !isImageSource) {
-          ctx.save();
-          ctx.translate(width, 0);
-          ctx.scale(-1, 1);
-          ctx.drawImage(sourceElem, 0, 0, width, height);
-          ctx.restore();
-        } else {
-          ctx.drawImage(sourceElem, 0, 0, width, height);
-        }
-
-        // Draw Restricted Zones if enabled
-        if (showZones && restrictedZones.length > 0) {
-          restrictedZones.forEach((zone) => {
-            if (zone.polygon_coords && zone.polygon_coords.length > 2) {
-              ctx.beginPath();
-              const startX = isMirrored && !isImageSource
-                ? (1 - zone.polygon_coords[0][0]) * width
-                : zone.polygon_coords[0][0] * width;
-              ctx.moveTo(startX, zone.polygon_coords[0][1] * height);
-
-              for (let i = 1; i < zone.polygon_coords.length; i++) {
-                const zx = isMirrored && !isImageSource
-                  ? (1 - zone.polygon_coords[i][0]) * width
-                  : zone.polygon_coords[i][0] * width;
-                ctx.lineTo(zx, zone.polygon_coords[i][1] * height);
-              }
-              ctx.closePath();
-              ctx.fillStyle = "rgba(239, 68, 68, 0.18)";
-              ctx.fill();
-              ctx.strokeStyle = "#ef4444";
-              ctx.lineWidth = 2;
-              ctx.stroke();
-            }
-          });
-        }
-
-        // Trigger Async Pipe Leakage Analysis & TensorFlow COCO-SSD Detection (~150ms)
-        const now = Date.now();
-        if (showBoxes && !isDetectingRef.current && now - lastInferenceTimeRef.current >= 150) {
-          isDetectingRef.current = true;
-          lastInferenceTimeRef.current = now;
-
-          // 1. Dedicated Computer Vision Pipe Leakage Analysis
-          const leakRes = detectPipeLeakage(sourceElem, {
-            source: inputMode === "image" ? "UPLOADED_IMAGE" : "LIVE_CAMERA"
-          });
-          setLeakageResult(leakRes);
-
-          if (leakRes && leakRes.detected && leakRes.confidence >= 0.75) {
-            if (!leakageAlertDispatchedRef.current) {
-              leakageAlertDispatchedRef.current = true;
-              const snapBase64 = captureCanvasSnapshot(canvas, "VISIBLE PIPE LEAKAGE DETECTED");
-              dispatchAlert({
-                event_type: "VISIBLE_PIPE_LEAKAGE",
-                zone_name: inputMode === "image" ? `Uploaded Image (${uploadedFileName || "Inspection"})` : "Live Camera Stream",
-                severity: "HIGH",
-                confidence: leakRes.confidence,
-                evidence_image_base64: snapBase64,
-                metadata: {
-                  source: inputMode,
-                  leakage_type: "VISIBLE_PIPE_LEAKAGE",
-                  confidence: leakRes.confidence,
-                  evidence_region: leakRes.evidence_region,
-                  status: "REVIEW_REQUIRED",
-                  description: "Visible liquid leakage detected from pipe/joint. Human verification required."
-                }
-              });
-            }
-          } else if (!leakRes || !leakRes.detected) {
-            leakageAlertDispatchedRef.current = false;
+        if (sourceElem) {
+          // Draw current frame onto canvas
+          if (isMirrored && !isImageSource) {
+            ctx.save();
+            ctx.translate(width, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(sourceElem, 0, 0, width, height);
+            ctx.restore();
+          } else {
+            ctx.drawImage(sourceElem, 0, 0, width, height);
           }
 
-          // 2. COCO-SSD Object Detection
-          detectObjectsAndMobilePhone(sourceElem, config)
-            .then((result) => {
-              // Real frame analysis counter increment
-              setFramesAnalyzedCount((prev) => prev + 1);
-              setLastAnalysisTimestamp(new Date().toLocaleTimeString());
+          // Draw Restricted Zones if enabled
+          if (showZones && restrictedZones.length > 0) {
+            restrictedZones.forEach((zone) => {
+              if (zone.polygon_coords && zone.polygon_coords.length > 2) {
+                ctx.beginPath();
+                const startX = isMirrored && !isImageSource
+                  ? (1 - zone.polygon_coords[0][0]) * width
+                  : zone.polygon_coords[0][0] * width;
+                ctx.moveTo(startX, zone.polygon_coords[0][1] * height);
 
-              const minConf = config.minConfidence || 0.35;
-              const rawSummary = result.rawDetectionsSummary || result.rawPredictions || [];
-              
-              // Filter valid predictions meeting confidence threshold
-              const validPredictions = rawSummary.filter((item) => (item.score || 0) >= minConf);
-
-              // Featured standard classes mapping
-              const FEATURED_CLASSES = [
-                { rawKey: "person", name: "Person / Personnel", icon: "👤" },
-                { rawKey: "cell phone", name: "Mobile Phone", icon: "📱" },
-                { rawKey: "backpack", name: "Backpack", icon: "🎒" },
-                { rawKey: "bottle", name: "Bottle", icon: "🍾" },
-                { rawKey: "car", name: "Car", icon: "🚗" }
-              ];
-
-              const classCounts = {};
-              const maxConfidences = {};
-
-              validPredictions.forEach((item) => {
-                let c = (item.class || "").toLowerCase().trim();
-                if (c === "phone" || c === "mobile phone" || c.includes("phone") || c.includes("mobile")) c = "cell phone";
-                else if (c === "bag" || c === "handbag") c = "backpack";
-
-                classCounts[c] = (classCounts[c] || 0) + 1;
-                const scorePct = Math.round((item.score || 0) * 100);
-                if (!maxConfidences[c] || scorePct > maxConfidences[c]) {
-                  maxConfidences[c] = scorePct;
+                for (let i = 1; i < zone.polygon_coords.length; i++) {
+                  const zx = isMirrored && !isImageSource
+                    ? (1 - zone.polygon_coords[i][0]) * width
+                    : zone.polygon_coords[i][0] * width;
+                  ctx.lineTo(zx, zone.polygon_coords[i][1] * height);
                 }
-              });
-
-              const displayCards = FEATURED_CLASSES.map((feat) => ({
-                rawKey: feat.rawKey,
-                name: feat.name,
-                icon: feat.icon,
-                count: classCounts[feat.rawKey] || 0,
-                confidence: maxConfidences[feat.rawKey] || 0
-              }));
-
-              // Append any extra non-featured COCO class detected in current frame
-              Object.keys(classCounts).forEach((k) => {
-                if (!FEATURED_CLASSES.some((f) => f.rawKey === k)) {
-                  const capitalized = k.charAt(0).toUpperCase() + k.slice(1);
-                  displayCards.push({
-                    rawKey: k,
-                    name: capitalized,
-                    icon: "📦",
-                    count: classCounts[k],
-                    confidence: maxConfidences[k] || 0
-                  });
-                }
-              });
-
-              const totalObjectsDetected = validPredictions.length;
-              const personsDetected = classCounts["person"] || 0;
-
-              const detailedList = validPredictions.map((item, idx) => ({
-                id: `DET-${idx + 1}`,
-                class: item.class,
-                score: item.score,
-                bbox: item.bbox || [0, 0, 0, 0],
-                timestamp: new Date().toLocaleTimeString()
-              }));
-
-              setDetectionSummary({
-                rawPredictionsCount: validPredictions.length,
-                totalObjectsDetected,
-                personsDetected,
-                rawDetectionsSummary: rawSummary,
-                validPredictions,
-                displayCards,
-                persons: result.persons || [],
-                phones: result.phones || [],
-                objectCounts: {
-                  person: personsDetected,
-                  phone: classCounts["cell phone"] || 0,
-                  bottle: classCounts["bottle"] || 0,
-                  backpack: classCounts["backpack"] || 0,
-                  car: classCounts["car"] || 0,
-                  other: Math.max(0, totalObjectsDetected - (personsDetected + (classCounts["cell phone"] || 0) + (classCounts["bottle"] || 0) + (classCounts["backpack"] || 0) + (classCounts["car"] || 0)))
-                },
-                detectionsDetailedList: detailedList
-              });
-
-              if (result.personCount !== personCount) {
-                setPersonCount(result.personCount);
+                ctx.closePath();
+                ctx.fillStyle = "rgba(239, 68, 68, 0.18)";
+                ctx.fill();
+                ctx.strokeStyle = "#ef4444";
+                ctx.lineWidth = 2;
+                ctx.stroke();
               }
+            });
+          }
 
-              // Synchronized Bounding Boxes Rendering on Canvas
-              if (showBoxes && validPredictions.length > 0) {
-                const sourceW = sourceElem.videoWidth || sourceElem.width || sourceElem.naturalWidth || 640;
-                const sourceH = sourceElem.videoHeight || sourceElem.height || sourceElem.naturalHeight || 360;
+          // Trigger Async Pipe Leakage Analysis & TensorFlow COCO-SSD Detection (~150ms)
+          const now = Date.now();
+          if (showBoxes && !isDetectingRef.current && now - lastInferenceTimeRef.current >= 150) {
+            isDetectingRef.current = true;
+            lastInferenceTimeRef.current = now;
 
-                validPredictions.forEach((item, idx) => {
-                  let box = item.bbox;
-                  const c = (item.class || "").toLowerCase().trim();
-                  const scorePct = Math.round((item.score || 0) * 100);
-                  let color = "#06b6d4";
-                  let labelText = "";
+            // 1. Dedicated Computer Vision Pipe Leakage Analysis
+            const leakRes = detectPipeLeakage(sourceElem, {
+              source: inputMode === "image" ? "UPLOADED_IMAGE" : "LIVE_CAMERA"
+            });
+            setLeakageResult(leakRes);
 
-                  if (c === "person") {
-                    color = "#06b6d4";
-                    const matchedPerson = (result.persons || [])[idx] || (result.persons || [])[0];
-                    const trackId = matchedPerson?.trackId || `TRK-P0${idx + 1}`;
-                    labelText = `${trackId} (Person: ${scorePct}%)`;
-                    if (matchedPerson?.box) box = matchedPerson.box;
-                  } else if (c === "cell phone" || c === "phone" || c === "mobile phone" || c.includes("phone")) {
-                    color = "#f59e0b";
-                    const matchedPhone = (result.phones || [])[idx] || (result.phones || [])[0];
-                    const phoneLabel = matchedPhone?.class || item.class || "Phone in Hand";
-                    labelText = `${phoneLabel}: ${scorePct}%`;
-                    if (matchedPhone?.box) box = matchedPhone.box;
-                  } else if (c === "backpack" || c === "bag" || c === "handbag") {
-                    color = "#818cf8";
-                    labelText = `Backpack: ${scorePct}%`;
-                  } else if (c === "bottle") {
-                    color = "#10b981";
-                    labelText = `Bottle: ${scorePct}%`;
-                  } else if (c === "car") {
-                    color = "#f43f5e";
-                    labelText = `Car: ${scorePct}%`;
-                  } else {
-                    color = "#38bdf8";
-                    const capitalized = c.charAt(0).toUpperCase() + c.slice(1);
-                    labelText = `${capitalized}: ${scorePct}%`;
-                  }
-
-                  if (box && box.length === 4) {
-                    let bx, by, bw, bh;
-                    if (box[0] <= 1.0 && box[1] <= 1.0 && box[2] <= 1.0 && box[3] <= 1.0) {
-                      bx = box[0] * width;
-                      by = box[1] * height;
-                      bw = box[2] * width;
-                      bh = box[3] * height;
-                    } else {
-                      bx = (box[0] / sourceW) * width;
-                      by = (box[1] / sourceH) * height;
-                      bw = (box[2] / sourceW) * width;
-                      bh = (box[3] / sourceH) * height;
-                    }
-
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 3;
-                    ctx.strokeRect(bx, by, bw, bh);
-
-                    ctx.fillStyle = color;
-                    const pillWidth = Math.max(120, labelText.length * 7.5 + 16);
-                    ctx.fillRect(bx, Math.max(0, by - 22), pillWidth, 20);
-
-                    ctx.fillStyle = "#ffffff";
-                    ctx.font = "bold 11px sans-serif";
-                    ctx.fillText(labelText, bx + 5, Math.max(14, by - 7));
+            if (leakRes && leakRes.detected && leakRes.confidence >= 0.75) {
+              if (!leakageAlertDispatchedRef.current) {
+                leakageAlertDispatchedRef.current = true;
+                const snapBase64 = captureCanvasSnapshot(canvas, "VISIBLE PIPE LEAKAGE DETECTED");
+                dispatchAlert({
+                  event_type: "VISIBLE_PIPE_LEAKAGE",
+                  zone_name: inputMode === "image" ? `Uploaded Image (${uploadedFileName || "Pipe Scan"})` : "Live Pipe Scanner",
+                  severity: "HIGH",
+                  confidence: leakRes.confidence,
+                  evidence_image_base64: snapBase64,
+                  metadata: {
+                    source: inputMode,
+                    leakage_type: "VISIBLE_PIPE_LEAKAGE",
+                    confidence: leakRes.confidence,
+                    evidence_region: leakRes.evidence_region,
+                    status: "REVIEW_REQUIRED",
+                    description: "Visible liquid leakage detected from pipe/joint. Human verification required."
                   }
                 });
               }
+            } else if (!leakRes || !leakRes.detected) {
+              leakageAlertDispatchedRef.current = false;
+            }
 
-              // Draw Pipe Leakage Evidence Region Highlight on Canvas
-              if (leakRes && leakRes.detected && leakRes.evidence_region) {
-                const [normX, normY, normW, normH] = leakRes.evidence_region;
-                const lx = normX * width;
-                const ly = normY * height;
-                const lw = normW * width;
-                const lh = normH * height;
+            // 2. COCO-SSD Object Detection
+            detectObjectsAndMobilePhone(sourceElem, config)
+              .then((result) => {
+                setFramesAnalyzedCount((prev) => prev + 1);
+                setLastAnalysisTimestamp(new Date().toLocaleTimeString());
 
-                ctx.save();
-                ctx.strokeStyle = "#ef4444";
-                ctx.lineWidth = 3.5;
-                ctx.setLineDash([8, 4]);
-                ctx.strokeRect(lx, ly, lw, lh);
+                const minConf = config.minConfidence || 0.35;
+                const rawSummary = result.rawDetectionsSummary || result.rawPredictions || [];
+                
+                // Filter valid predictions meeting confidence threshold
+                const validPredictions = rawSummary.filter((item) => (item.score || 0) >= minConf);
 
-                ctx.fillStyle = "rgba(239, 68, 68, 0.22)";
-                ctx.fillRect(lx, ly, lw, lh);
+                // Featured standard classes mapping
+                const FEATURED_CLASSES = [
+                  { rawKey: "person", name: "Person / Personnel", icon: "👤" },
+                  { rawKey: "cell phone", name: "Mobile Phone", icon: "📱" },
+                  { rawKey: "backpack", name: "Backpack", icon: "🎒" },
+                  { rawKey: "bottle", name: "Bottle", icon: "🍾" },
+                  { rawKey: "car", name: "Car", icon: "🚗" }
+                ];
 
-                ctx.fillStyle = "#ef4444";
-                const pillW = Math.max(220, Math.round(lw * 0.75));
-                ctx.fillRect(lx, Math.max(0, ly - 24), pillW, 22);
+                const classCounts = {};
+                const maxConfidences = {};
 
-                ctx.fillStyle = "#ffffff";
-                ctx.font = "bold 11px sans-serif";
-                ctx.fillText(`🔴 VISIBLE PIPE LEAKAGE (${Math.round(leakRes.confidence * 100)}%)`, lx + 6, Math.max(14, ly - 8));
-                ctx.restore();
-              }
-            })
-            .catch((err) => {
-              console.error("AI Object Detection Error:", err);
-            })
-            .finally(() => {
-              isDetectingRef.current = false;
-            });
+                validPredictions.forEach((item) => {
+                  let c = (item.class || "").toLowerCase().trim();
+                  if (c === "phone" || c === "mobile phone" || c.includes("phone") || c.includes("mobile")) c = "cell phone";
+                  else if (c === "bag" || c === "handbag") c = "backpack";
+
+                  classCounts[c] = (classCounts[c] || 0) + 1;
+                  const scorePct = Math.round((item.score || 0) * 100);
+                  if (!maxConfidences[c] || scorePct > maxConfidences[c]) {
+                    maxConfidences[c] = scorePct;
+                  }
+                });
+
+                const displayCards = FEATURED_CLASSES.map((feat) => ({
+                  rawKey: feat.rawKey,
+                  name: feat.name,
+                  icon: feat.icon,
+                  count: classCounts[feat.rawKey] || 0,
+                  confidence: maxConfidences[feat.rawKey] || 0
+                }));
+
+                // Append any extra non-featured COCO class detected in current frame
+                Object.keys(classCounts).forEach((k) => {
+                  if (!FEATURED_CLASSES.some((f) => f.rawKey === k)) {
+                    const capitalized = k.charAt(0).toUpperCase() + k.slice(1);
+                    displayCards.push({
+                      rawKey: k,
+                      name: capitalized,
+                      icon: "📦",
+                      count: classCounts[k],
+                      confidence: maxConfidences[k] || 0
+                    });
+                  }
+                });
+
+                const totalObjectsDetected = validPredictions.length;
+                const personsDetected = classCounts["person"] || 0;
+
+                const detailedList = validPredictions.map((item, idx) => ({
+                  id: `DET-${idx + 1}`,
+                  class: item.class,
+                  score: item.score,
+                  bbox: item.bbox || [0, 0, 0, 0],
+                  timestamp: new Date().toLocaleTimeString()
+                }));
+
+                setDetectionSummary({
+                  rawPredictionsCount: validPredictions.length,
+                  totalObjectsDetected,
+                  personsDetected,
+                  rawDetectionsSummary: rawSummary,
+                  validPredictions,
+                  displayCards,
+                  persons: result.persons || [],
+                  phones: result.phones || [],
+                  objectCounts: {
+                    person: personsDetected,
+                    phone: classCounts["cell phone"] || 0,
+                    bottle: classCounts["bottle"] || 0,
+                    backpack: classCounts["backpack"] || 0,
+                    car: classCounts["car"] || 0,
+                    other: Math.max(0, totalObjectsDetected - (personsDetected + (classCounts["cell phone"] || 0) + (classCounts["bottle"] || 0) + (classCounts["backpack"] || 0) + (classCounts["car"] || 0)))
+                  },
+                  detectionsDetailedList: detailedList
+                });
+
+                if (result.personCount !== personCount) {
+                  setPersonCount(result.personCount);
+                }
+
+                // Synchronized Bounding Boxes Rendering on Canvas
+                if (showBoxes && validPredictions.length > 0) {
+                  const sourceW = sourceElem.videoWidth || sourceElem.width || sourceElem.naturalWidth || 640;
+                  const sourceH = sourceElem.videoHeight || sourceElem.height || sourceElem.naturalHeight || 360;
+
+                  validPredictions.forEach((item, idx) => {
+                    let box = item.bbox;
+                    const c = (item.class || "").toLowerCase().trim();
+                    const scorePct = Math.round((item.score || 0) * 100);
+                    let color = "#06b6d4";
+                    let labelText = "";
+
+                    if (c === "person") {
+                      color = "#06b6d4";
+                      const matchedPerson = (result.persons || [])[idx] || (result.persons || [])[0];
+                      const trackId = matchedPerson?.trackId || `TRK-P0${idx + 1}`;
+                      labelText = `${trackId} (Person: ${scorePct}%)`;
+                      if (matchedPerson?.box) box = matchedPerson.box;
+                    } else if (c === "cell phone" || c === "phone" || c === "mobile phone" || c.includes("phone")) {
+                      color = "#f59e0b";
+                      labelText = `Mobile Phone: ${scorePct}%`;
+                      const matchedPhone = (result.phones || [])[idx] || (result.phones || [])[0];
+                      if (matchedPhone?.box) box = matchedPhone.box;
+                    } else if (c === "backpack" || c === "bag" || c === "handbag") {
+                      color = "#818cf8";
+                      labelText = `Backpack: ${scorePct}%`;
+                    } else if (c === "bottle") {
+                      color = "#10b981";
+                      labelText = `Bottle: ${scorePct}%`;
+                    } else if (c === "car") {
+                      color = "#f43f5e";
+                      labelText = `Car: ${scorePct}%`;
+                    } else {
+                      color = "#38bdf8";
+                      const capitalized = c.charAt(0).toUpperCase() + c.slice(1);
+                      labelText = `${capitalized}: ${scorePct}%`;
+                    }
+
+                    if (box && box.length === 4) {
+                      let bx, by, bw, bh;
+                      if (box[0] <= 1.0 && box[1] <= 1.0 && box[2] <= 1.0 && box[3] <= 1.0) {
+                        bx = box[0] * width;
+                        by = box[1] * height;
+                        bw = box[2] * width;
+                        bh = box[3] * height;
+                      } else {
+                        bx = (box[0] / sourceW) * width;
+                        by = (box[1] / sourceH) * height;
+                        bw = (box[2] / sourceW) * width;
+                        bh = (box[3] / sourceH) * height;
+                      }
+
+                      ctx.strokeStyle = color;
+                      ctx.lineWidth = 3;
+                      ctx.strokeRect(bx, by, bw, bh);
+
+                      ctx.fillStyle = color;
+                      const pillWidth = Math.max(120, labelText.length * 7.5 + 16);
+                      ctx.fillRect(bx, Math.max(0, by - 22), pillWidth, 20);
+
+                      ctx.fillStyle = "#ffffff";
+                      ctx.font = "bold 11px sans-serif";
+                      ctx.fillText(labelText, bx + 5, Math.max(14, by - 7));
+                    }
+                  });
+                }
+
+                // Draw Pipe Leakage Evidence Region Highlight on Canvas
+                if (leakRes && leakRes.detected && leakRes.evidence_region) {
+                  const [normX, normY, normW, normH] = leakRes.evidence_region;
+                  const lx = normX * width;
+                  const ly = normY * height;
+                  const lw = normW * width;
+                  const lh = normH * height;
+
+                  ctx.save();
+                  ctx.strokeStyle = "#ef4444";
+                  ctx.lineWidth = 3.5;
+                  ctx.setLineDash([8, 4]);
+                  ctx.strokeRect(lx, ly, lw, lh);
+
+                  ctx.fillStyle = "rgba(239, 68, 68, 0.22)";
+                  ctx.fillRect(lx, ly, lw, lh);
+
+                  ctx.fillStyle = "#ef4444";
+                  const pillW = Math.max(220, Math.round(lw * 0.75));
+                  ctx.fillRect(lx, Math.max(0, ly - 24), pillW, 22);
+
+                  ctx.fillStyle = "#ffffff";
+                  ctx.font = "bold 11px sans-serif";
+                  ctx.fillText(`🔴 VISIBLE PIPE LEAKAGE (${Math.round(leakRes.confidence * 100)}%)`, lx + 6, Math.max(14, ly - 8));
+                  ctx.restore();
+                }
+              })
+              .catch((err) => {
+                console.error("AI Object Detection Error:", err);
+              })
+              .finally(() => {
+                isDetectingRef.current = false;
+              });
+          }
         }
       }
 
@@ -522,11 +535,11 @@ export default function ImageCameraInspectionView() {
   const handleCaptureEvidenceAlert = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const base64Snap = captureCanvasSnapshot(canvas, "SAFETY INSPECTION EVIDENCE");
+    const base64Snap = captureCanvasSnapshot(canvas, "PIPE INSPECTION EVIDENCE");
 
     dispatchAlert({
       event_type: "PPE_VIOLATION",
-      zone_name: inputMode === "image" ? `Uploaded Image (${uploadedFileName})` : "Live Camera Stream",
+      zone_name: inputMode === "image" ? `Pipe Image (${uploadedFileName})` : "Pipe Camera Feed",
       severity: "HIGH",
       confidence: 0.95,
       evidence_image_base64: base64Snap,
@@ -540,13 +553,13 @@ export default function ImageCameraInspectionView() {
   const isPhoneDetected = detectionSummary.objectCounts.phone > 0;
 
   let safetyResult = {
-    status: "PASS",
+    status: "NORMAL",
     color: "emerald",
     bg: "bg-emerald-500/10",
     border: "border-emerald-500/30",
     text: "text-emerald-400",
-    title: "🟢 No Active Safety Violations Detected",
-    sub: "All monitored visual elements are operating strictly within safety compliance limits."
+    title: "🟢 Pipe Inspection Status: Normal Operation",
+    sub: "All pipe inspection parameters, surrounding personnel and safety limits are operating normally."
   };
 
   if (leakageResult && leakageResult.detected) {
@@ -566,8 +579,8 @@ export default function ImageCameraInspectionView() {
       bg: "bg-amber-500/10",
       border: "border-amber-500/30",
       text: "text-amber-400",
-      title: "🟠 Potential Safety Risk — Phone Detected In Frame",
-      sub: "Mobile device detected near process area. Continuously tracking for misuse policy."
+      title: "🟠 Caution — Mobile Phone Misuse Near Pipe Line",
+      sub: "Mobile device detected in pipe operational bay. Tracking for compliance."
     };
   } else if (personCount > 0) {
     safetyResult = {
@@ -577,32 +590,22 @@ export default function ImageCameraInspectionView() {
       border: "border-cyan-500/30",
       text: "text-cyan-400",
       title: "👤 Personnel Active in Inspection Zone",
-      sub: `${personCount} personnel detected in camera view.`
+      sub: `${personCount} personnel detected in pipe inspection area.`
     };
   } else if (activeUnresolvedAlerts > 0) {
     safetyResult = {
-      status: "VIOLATION",
+      status: "INCIDENT",
       color: "amber",
       bg: "bg-amber-500/10",
       border: "border-amber-500/30",
       text: "text-amber-400",
-      title: "⚠️ Safety Event Logged — Action Required",
-      sub: `${activeUnresolvedAlerts} active unresolved safety event(s) in system log.`
+      title: "⚠️ Safety Event Logged — Review Required",
+      sub: `${activeUnresolvedAlerts} active unresolved safety event(s) logged in system.`
     };
   }
 
-  // Derive Pipeline Stage Highlights based on real state
-  const pipelineState = {
-    cameraInput: streamSource !== null || inputMode === "image",
-    frameAnalysis: framesAnalyzedCount > 0,
-    objectDetection: detectionSummary.rawPredictionsCount > 0,
-    tracking: personCount > 0,
-    safetyRules: true,
-    inspectionResult: true
-  };
-
   const isModelReady = modelInfo.status === "READY";
-  const isInputActive = streamSource !== null || (inputMode === "image" && uploadedImageSrc !== null);
+  const isInputActive = (inputMode === "camera" && activeStream !== null) || (inputMode === "image" && uploadedImageSrc !== null);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto font-sans">
@@ -684,10 +687,10 @@ export default function ImageCameraInspectionView() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-slate-100 tracking-tight flex items-center gap-2">
-                AI IMAGE & CAMERA INSPECTION SCANNER
+                PIPE INSPECTION & COMPUTER VISION SCANNER
               </h1>
               <p className="text-xs text-slate-400 mt-0.5">
-                Real-time AI-powered visual inspection and safety analysis powered by TensorFlow.js
+                Real-time industrial pipe visual inspection, object detection and AI safety compliance scanning.
               </p>
             </div>
           </div>
@@ -708,11 +711,11 @@ export default function ImageCameraInspectionView() {
                   isModelReady ? "bg-emerald-500 animate-pulse" : "bg-red-500"
                 }`}
               />
-              <span>{isModelReady ? "🟢 AI ONLINE" : "🔴 AI OFFLINE"}</span>
+              <span>{isModelReady ? "🟢 AI SCANNER ONLINE" : "🔴 AI OFFLINE"}</span>
             </span>
 
             <span className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-cyan-400 font-bold">
-              {inputMode === "camera" ? "📷 SOURCE: LIVE CAMERA" : "🖼️ SOURCE: UPLOADED IMAGE"}
+              {inputMode === "camera" ? "📹 LIVE PIPE CAMERA" : "🖼️ UPLOADED PIPE IMAGE"}
             </span>
           </div>
 
@@ -721,7 +724,7 @@ export default function ImageCameraInspectionView() {
             <button
               onClick={handleSelectLiveCamera}
               disabled={isConnectingCam}
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
                 inputMode === "camera"
                   ? "bg-cyan-600 text-white shadow-lg shadow-cyan-600/30"
                   : "text-slate-400 hover:text-slate-200"
@@ -732,14 +735,14 @@ export default function ImageCameraInspectionView() {
             </button>
 
             <label
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
                 inputMode === "image"
                   ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/30"
                   : "text-slate-400 hover:text-slate-200"
               }`}
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>Upload Image</span>
+              <span>Upload Pipe Image</span>
               <input
                 type="file"
                 accept="image/jpeg,image/png,image/jpg"
@@ -751,7 +754,7 @@ export default function ImageCameraInspectionView() {
         </div>
       </div>
 
-      {/* 2. PROMINENT LIVE AI INSPECTION STATUS BAR */}
+      {/* 2. PROMINENT LIVE PIPE INSPECTION STATUS BAR */}
       <div
         className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs shadow-lg transition-all ${
           isInputActive
@@ -764,7 +767,7 @@ export default function ImageCameraInspectionView() {
             className={`p-2.5 rounded-xl border shrink-0 ${
               isInputActive
                 ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-400"
-                : "bg-red-500/10 border-red-500/30 text-red-400"
+                : "bg-amber-500/10 border-amber-500/30 text-amber-400"
             }`}
           >
             {isInputActive ? <Activity className="w-5 h-5 animate-pulse" /> : <AlertCircle className="w-5 h-5" />}
@@ -772,16 +775,16 @@ export default function ImageCameraInspectionView() {
           <div>
             <div className="flex items-center gap-2">
               <span className="font-bold text-sm text-slate-100 tracking-tight">
-                {isInputActive ? "🟢 AI INSPECTION ACTIVE" : "🔴 INSPECTION OFFLINE"}
+                {isInputActive ? "🟢 PIPE INSPECTION RUNNING" : "🟠 PIPE SCANNER IDLE — AWAITING INPUT"}
               </span>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-950 border border-slate-800 font-mono text-cyan-400">
-                ● {inputMode === "camera" ? "Live Camera Analysis Running" : "Uploaded Image Analysis Ready"}
+                ● {inputMode === "camera" ? "Live Camera Pipe Scan" : "Image Inspection Active"}
               </span>
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
               {isInputActive
-                ? "Continuous frame evaluation, spatial bounding box detection & real-time safety rules execution"
-                : "Please click 'Live Camera' to enable webcam stream or 'Upload Image' to analyze a photo."}
+                ? "Continuous industrial pipe visual scanning, spatial bounding box detection & real-time safety evaluation"
+                : "Click 'Live Camera' to start webcam feed or 'Upload Pipe Image' to scan a pipe photo."}
             </p>
           </div>
         </div>
@@ -824,31 +827,31 @@ export default function ImageCameraInspectionView() {
         </div>
       )}
 
-      {/* 3. AI INSPECTION PIPELINE STAGE HIGHLIGHTER */}
+      {/* 3. AI PIPE INSPECTION PIPELINE STAGES */}
       <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
             <Layers className="w-4 h-4 text-cyan-400" />
-            AI Inspection Pipeline Stages
+            Pipe Inspection Pipeline Stages
           </span>
-          <span className="text-[10px] text-slate-500 font-mono">Real Engine Flow</span>
+          <span className="text-[10px] text-slate-500 font-mono">Real-Time Computer Vision Engine</span>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-center text-[11px] font-mono font-bold">
           <div
             className={`p-2.5 rounded-xl border transition ${
-              pipelineState.cameraInput
+              isInputActive
                 ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/40 shadow-xs"
                 : "bg-slate-950 text-slate-500 border-slate-800"
             }`}
           >
             <span className="block text-[9px] text-slate-500 uppercase font-sans">STAGE 1</span>
-            <span>INPUT SOURCE</span>
+            <span>PIPE INPUT</span>
           </div>
 
           <div
             className={`p-2.5 rounded-xl border transition ${
-              pipelineState.frameAnalysis
+              framesAnalyzedCount > 0
                 ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/40 shadow-xs"
                 : "bg-slate-950 text-slate-500 border-slate-800"
             }`}
@@ -859,7 +862,7 @@ export default function ImageCameraInspectionView() {
 
           <div
             className={`p-2.5 rounded-xl border transition ${
-              pipelineState.objectDetection
+              detectionSummary.rawPredictionsCount > 0
                 ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/40 shadow-xs"
                 : "bg-slate-950 text-slate-500 border-slate-800"
             }`}
@@ -870,18 +873,18 @@ export default function ImageCameraInspectionView() {
 
           <div
             className={`p-2.5 rounded-xl border transition ${
-              pipelineState.tracking
+              personCount > 0
                 ? "bg-indigo-500/10 text-indigo-300 border-indigo-500/40 shadow-xs"
                 : "bg-slate-950 text-slate-500 border-slate-800"
             }`}
           >
             <span className="block text-[9px] text-slate-500 uppercase font-sans">STAGE 4</span>
-            <span>TRACKING ID</span>
+            <span>PERSON TRACK</span>
           </div>
 
           <div
             className={`p-2.5 rounded-xl border transition ${
-              pipelineState.safetyRules
+              isInputActive
                 ? "bg-amber-500/10 text-amber-300 border-amber-500/40 shadow-xs"
                 : "bg-slate-950 text-slate-500 border-slate-800"
             }`}
@@ -892,26 +895,26 @@ export default function ImageCameraInspectionView() {
 
           <div
             className={`p-2.5 rounded-xl border transition ${
-              pipelineState.inspectionResult
+              isInputActive
                 ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/40 shadow-xs"
                 : "bg-slate-950 text-slate-500 border-slate-800"
             }`}
           >
             <span className="block text-[9px] text-slate-500 uppercase font-sans">STAGE 6</span>
-            <span>VERDICT RESULT</span>
+            <span>PIPE VERDICT</span>
           </div>
         </div>
       </div>
 
       {/* 4. MAIN GRID: VIEWPORT (LEFT 2 COLS) + "WHAT AI IS DETECTING" PANEL (RIGHT 1 COL) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left 2 Cols: Camera/Image Viewport */}
+        {/* Left 2 Cols: Pipe Inspection Viewport */}
         <div className="lg:col-span-2 p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-4 shadow-xl">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
+              <div className={`w-2.5 h-2.5 rounded-full ${isInputActive ? "bg-emerald-500 animate-ping" : "bg-slate-600"}`} />
               <h2 className="text-sm font-bold text-slate-100">
-                Visual Inspection Viewport ({inputMode === "image" ? `Image: ${uploadedFileName || "Local File"}` : "Live Camera"})
+                Pipe Inspection Viewport ({inputMode === "image" ? `Image: ${uploadedFileName || "Pipe File"}` : "Live Pipe Camera"})
               </h2>
             </div>
 
@@ -941,14 +944,14 @@ export default function ImageCameraInspectionView() {
           </div>
 
           {/* Viewport Box */}
-          <div className="relative rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex items-center justify-center">
+          <div className="relative rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex items-center justify-center min-h-[320px]">
             {/* Upper-Left LIVE & AI Scanning Indicator */}
             {isInputActive && (
               <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-slate-950/90 border border-slate-800 px-3 py-1.5 rounded-xl shadow-lg backdrop-blur-md">
                 <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-xs font-bold text-slate-100 font-mono">LIVE</span>
+                <span className="text-xs font-bold text-slate-100 font-mono">LIVE SCAN</span>
                 <span className="text-[10px] text-cyan-400 font-medium pl-1 border-l border-slate-700 animate-pulse">
-                  Analyzing frames & evaluating safety...
+                  Analyzing pipe frames & safety...
                 </span>
               </div>
             )}
@@ -959,7 +962,7 @@ export default function ImageCameraInspectionView() {
               <img
                 ref={imageRef}
                 src={uploadedImageSrc}
-                alt="Uploaded inspection"
+                alt="Uploaded pipe inspection"
                 className="hidden"
                 crossOrigin="anonymous"
               />
@@ -969,32 +972,48 @@ export default function ImageCameraInspectionView() {
             <canvas ref={canvasRef} className="w-full h-full object-contain" />
 
             {/* No Input Overlay - Camera */}
-            {!streamSource && inputMode === "camera" && !cameraError && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-slate-950/95">
+            {!activeStream && inputMode === "camera" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-slate-950/95 z-20">
                 <Camera className="w-16 h-16 text-slate-700 mb-3" />
-                <h3 className="text-base font-bold text-slate-300">LIVE CAMERA NOT CONNECTED</h3>
+                <h3 className="text-base font-bold text-slate-300">LIVE PIPE CAMERA NOT CONNECTED</h3>
                 <p className="text-xs text-slate-500 mt-1 max-w-md">
-                  Click <strong>"Live Camera"</strong> above to allow camera access or click <strong>"Upload Image"</strong> to scan a photo.
+                  Click <strong>"Start Live Camera"</strong> below to connect your webcam feed or click <strong>"Upload Pipe Image"</strong> to scan a photo.
                 </p>
-                <button
-                  onClick={handleSelectLiveCamera}
-                  className="mt-4 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition shadow-lg shadow-cyan-500/20"
-                >
-                  Start Live Camera
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-3 mt-4">
+                  <button
+                    onClick={handleSelectLiveCamera}
+                    disabled={isConnectingCam}
+                    className="px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition shadow-lg shadow-cyan-500/20 flex items-center gap-2"
+                  >
+                    {isConnectingCam ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+                    <span>Start Live Camera</span>
+                  </button>
+
+                  <label className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs transition border border-slate-700 cursor-pointer flex items-center gap-2">
+                    <Upload className="w-4 h-4 text-emerald-400" />
+                    <span>Upload Pipe Image</span>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/jpg"
+                      onChange={handleImageUpload}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
               </div>
             )}
 
             {/* No Input Overlay - Image */}
             {!uploadedImageSrc && inputMode === "image" && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-slate-950/95">
+              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-slate-950/95 z-20">
                 <FileImage className="w-16 h-16 text-slate-700 mb-3" />
-                <h3 className="text-base font-bold text-slate-300">NO IMAGE UPLOADED YET</h3>
+                <h3 className="text-base font-bold text-slate-300">NO PIPE IMAGE UPLOADED YET</h3>
                 <p className="text-xs text-slate-500 mt-1 max-w-md">
-                  Please select a JPG, JPEG, or PNG image file from your computer to run computer vision inspection.
+                  Please select a JPG, JPEG, or PNG pipe image file from your computer to run computer vision inspection.
                 </p>
-                <label className="mt-4 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition shadow-lg shadow-emerald-500/20 cursor-pointer">
-                  <span>Select JPG / PNG Image</span>
+                <label className="mt-4 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition shadow-lg shadow-emerald-500/20 cursor-pointer flex items-center gap-2">
+                  <Upload className="w-4 h-4" />
+                  <span>Select Pipe Image (JPG / PNG)</span>
                   <input
                     type="file"
                     accept="image/jpeg,image/png,image/jpg"
@@ -1009,9 +1028,9 @@ export default function ImageCameraInspectionView() {
           {/* Action Bar & Evidence Button */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 text-xs">
             <div className="text-slate-400 flex items-center gap-2 font-mono">
-              <span>Current Source:</span>
+              <span>Source:</span>
               <span className="text-cyan-400 font-bold">
-                {inputMode === "camera" ? (streamSource?.name || "Webcam Input") : (uploadedFileName || "Uploaded Photo")}
+                {inputMode === "camera" ? (streamSource?.name || "Webcam Input") : (uploadedFileName || "Uploaded Pipe Image")}
               </span>
             </div>
 
@@ -1072,8 +1091,8 @@ export default function ImageCameraInspectionView() {
 
             {/* Model Predictions Breakdown */}
             {!detectionSummary.validPredictions || detectionSummary.validPredictions.length === 0 ? (
-              <div className="p-5 rounded-xl bg-slate-950/80 border border-slate-800/80 text-center space-y-2 py-8">
-                <EyeOff className="w-6 h-6 text-slate-500 mx-auto" />
+              <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800/80 text-center space-y-1.5 py-6">
+                <EyeOff className="w-5 h-5 text-slate-500 mx-auto" />
                 <p className="text-xs font-semibold text-slate-300">
                   No objects detected in current frame
                 </p>
@@ -1082,7 +1101,7 @@ export default function ImageCameraInspectionView() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-2 font-mono text-xs max-h-[380px] overflow-y-auto pr-1">
+              <div className="space-y-2 font-mono text-xs max-h-[340px] overflow-y-auto pr-1">
                 {(detectionSummary.displayCards || []).map((item, idx) => (
                   <div
                     key={idx}
@@ -1175,7 +1194,7 @@ export default function ImageCameraInspectionView() {
           <div className={`p-5 rounded-2xl border ${safetyResult.bg} ${safetyResult.border} ${safetyResult.text} shadow-xl space-y-2`}>
             <div className="flex items-center justify-between">
               <span className="text-[10px] uppercase font-bold tracking-wider font-mono">
-                AI INSPECTION VERDICT RESULT
+                PIPE INSPECTION VERDICT RESULT
               </span>
               <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-950/80 border border-slate-800">
                 {safetyResult.status}
@@ -1188,7 +1207,7 @@ export default function ImageCameraInspectionView() {
           {/* Real Metrics Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-xs font-mono">
             <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
-              <span className="text-[10px] text-slate-500 uppercase font-semibold">Persons</span>
+              <span className="text-[10px] text-slate-500 uppercase font-semibold">Personnel</span>
               <div className="mt-1 text-sm font-bold text-emerald-400">{personCount}</div>
             </div>
 
@@ -1294,7 +1313,7 @@ export default function ImageCameraInspectionView() {
                       <td className="py-2.5 px-3 font-bold text-slate-200 capitalize flex items-center gap-2">
                         {item.class === "person" ? (
                           <Users className="w-3.5 h-3.5 text-cyan-400" />
-                        ) : item.class === "cell phone" || (item.class || "").toLowerCase().includes("phone") ? (
+                        ) : item.class === "cell phone" ? (
                           <Smartphone className="w-3.5 h-3.5 text-amber-400" />
                         ) : (
                           <Box className="w-3.5 h-3.5 text-slate-400" />
@@ -1329,7 +1348,7 @@ export default function ImageCameraInspectionView() {
                 ) : (
                   <tr>
                     <td colSpan={6} className="py-6 text-center text-slate-500 italic">
-                      No detections in current frame or image.
+                      No detections in current pipe frame or image.
                     </td>
                   </tr>
                 )}

@@ -175,6 +175,108 @@ def process_frame(payload: dict = Body(...)):
         return {"is_assessable": False, "reason": f"Frame decoding error: {str(e)}"}
 
 # ----------------------------------------------------
+# REAL BACKEND YOLO PHONE DETECTION ENGINE API
+# ----------------------------------------------------
+yolo_model_handle = None
+
+def get_yolo_model():
+    global yolo_model_handle
+    if yolo_model_handle is None:
+        try:
+            from ultralytics import YOLO
+            yolo_model_handle = YOLO('yolov8n.pt')
+            print(f"✅ Backend PyTorch YOLO Model Loaded: {getattr(yolo_model_handle, 'ckpt_path', 'yolov8n.pt')}")
+            print(f"   Model Classes: {len(yolo_model_handle.names)} classes. Cell phone class ID 67: {yolo_model_handle.names.get(67)}")
+        except Exception as e:
+            print(f"❌ Failed to load Ultralytics YOLO: {e}")
+            yolo_model_handle = False
+    return yolo_model_handle if yolo_model_handle is not False else None
+
+@app.post("/api/yolo/detect")
+def detect_yolo_objects(payload: dict = Body(...)):
+    """
+    Runs PyTorch YOLO model directly on frame image bytes.
+    Accepts conf (default 0.10) and imgsz (default 1280).
+    Returns raw YOLO detections with class_name, class_id, confidence, and normalized bounding box [norm_x, norm_y, norm_w, norm_h].
+    """
+    image_base64 = payload.get("image_base64", "")
+    conf_thresh = float(payload.get("conf", 0.10))
+    img_size = int(payload.get("imgsz", 1280))
+
+    if not image_base64:
+        return {"status": "ERROR", "message": "No image data provided", "detections": []}
+
+    if "," in image_base64:
+        image_base64 = image_base64.split(",")[1]
+
+    try:
+        import numpy as np
+        import cv2
+
+        model = get_yolo_model()
+        if not model:
+            return {"status": "OFFLINE", "message": "Backend YOLO Model Unavailable", "detections": []}
+
+        image_bytes = base64.b64decode(image_base64)
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return {"status": "ERROR", "message": "Invalid image payload", "detections": []}
+
+        h, w, _ = img.shape
+
+        # Run PyTorch YOLO Inference directly on image (Requirements 1-6)
+        results = model.predict(source=img, conf=conf_thresh, imgsz=img_size, save=False)
+        result = results[0]
+
+        detections = []
+        raw_summary = []
+
+        boxes = result.boxes
+        if boxes is not None and len(boxes) > 0:
+            for i, box in enumerate(boxes):
+                cls_id = int(box.cls[0].item())
+                cls_name = model.names.get(cls_id, str(cls_id))
+                score = float(box.conf[0].item())
+                xywh = box.xywh[0].tolist()
+
+                # Calculate normalized bbox [norm_x, norm_y, norm_w, norm_h] in range 0..1
+                cx, cy, bw, bh = xywh
+                norm_x = max(0.0, min(1.0, (cx - bw / 2.0) / w))
+                norm_y = max(0.0, min(1.0, (cy - bh / 2.0) / h))
+                norm_w = max(0.0, min(1.0 - norm_x, bw / w))
+                norm_h = max(0.0, min(1.0 - norm_y, bh / h))
+
+                det_obj = {
+                    "idx": i,
+                    "class_id": cls_id,
+                    "class_name": cls_name,
+                    "confidence": round(score, 4),
+                    "bbox": [round(norm_x, 4), round(norm_y, 4), round(norm_w, 4), round(norm_h, 4)],
+                    "pixel_bbox": [round(cx - bw/2, 1), round(cy - bh/2, 1), round(bw, 1), round(bh, 1)]
+                }
+                detections.append(det_obj)
+                raw_summary.append(f"{cls_name} ({round(score*100)}%)")
+
+        print(f"[BACKEND YOLO INFERENCE API] Image Size: {w}x{h} | Detections Count: {len(detections)} | Summary: {raw_summary}")
+
+        return {
+            "status": "SUCCESS",
+            "model_path": getattr(model, 'ckpt_path', 'yolov8n.pt'),
+            "model_name": "PyTorch YOLOv8",
+            "imgsz": img_size,
+            "conf": conf_thresh,
+            "detections_count": len(detections),
+            "detections": detections,
+            "model_classes_count": len(model.names)
+        }
+
+    except Exception as e:
+        print(f"❌ Backend YOLO Inference Error: {e}")
+        return {"status": "ERROR", "message": str(e), "detections": []}
+
+# ----------------------------------------------------
 # ALERTS & EVIDENCE ENDPOINTS
 # ----------------------------------------------------
 @app.get("/api/alerts")

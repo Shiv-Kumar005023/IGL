@@ -11,6 +11,21 @@ export async function fetchStats() {
   }
 }
 
+export async function detectYoloObjectsApi(imageBase64, conf = 0.10, imgsz = 1280) {
+  try {
+    const res = await fetch(`${API_BASE}/yolo/detect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_base64: imageBase64, conf, imgsz })
+    });
+    if (!res.ok) throw new Error("YOLO API error");
+    return await res.json();
+  } catch (err) {
+    console.warn("Backend YOLO API unreachable:", err);
+    return null;
+  }
+}
+
 export async function fetchCameras() {
   try {
     const res = await fetch(`${API_BASE}/cameras`);

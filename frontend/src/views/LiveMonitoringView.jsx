@@ -108,7 +108,7 @@ export default function LiveMonitoringView() {
   // Configurable Detection Thresholds
   const [config, setConfig] = useState({
     minConfidence: 0.35,
-    phoneThreshold: 0.15,
+    phoneThreshold: 0.35,
     minDurationSec: 2.0,
     warningIntervalSec: 2.5,
     maxWarnings: 3
@@ -423,7 +423,7 @@ export default function LiveMonitoringView() {
             drawnPersonBoxes.push({ trackId: pObj.trackId, px, py, pw, ph, center: [px + pw / 2, py + ph / 2] });
           }
 
-          // Draw Associated Phone Bounding Boxes
+          // Draw Associated Phone Bounding Boxes (YOLO26 Phone-in-Hand Detector)
           for (let j = 0; j < activePhones.length; j++) {
             const phObj = activePhones[j];
             const phBox = phObj.box;
@@ -436,11 +436,14 @@ export default function LiveMonitoringView() {
             ctx.strokeRect(phx, phy, phw, phh);
             ctx.setLineDash([]);
 
-            ctx.fillStyle = "rgba(6, 182, 212, 0.9)";
-            ctx.fillRect(phx, phy - 20, 110, 20);
+            const phoneTag = `${phObj.class || "Phone in Hand"} (${Math.round((phObj.confidence || 0.85) * 100)}%)`;
+            const tagW = Math.max(130, phoneTag.length * 7.5);
+
+            ctx.fillStyle = "rgba(6, 182, 212, 0.95)";
+            ctx.fillRect(phx, phy - 20, tagW, 20);
             ctx.fillStyle = "#000000";
             ctx.font = "bold 10px sans-serif";
-            ctx.fillText(`Cell Phone (${Math.round(phObj.confidence * 100)}%)`, phx + 4, phy - 6);
+            ctx.fillText(phoneTag, phx + 4, phy - 6);
           }
 
           // Draw Proximity Distance Lines between Multiple Detected Persons
@@ -652,7 +655,19 @@ export default function LiveMonitoringView() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Requirement 9 & 10: Status "Phone Detector: YOLO26 | ACTIVE / OFFLINE" */}
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
+                detectionsRef.current?.phoneDetectorIsActive !== false
+                  ? "bg-cyan-500/10 text-cyan-400 border-cyan-500/30"
+                  : "bg-red-500/20 text-red-400 border-red-500/40"
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>{detectionsRef.current?.phoneDetectorStatus || "Phone Detector: YOLO26 | ACTIVE"}</span>
+            </span>
+
             <span
               className={`px-3 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
                 phoneMetrics.sirenActive
